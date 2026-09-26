@@ -25,11 +25,14 @@ hardware. Most of the audio path has never been tested on a real unit.
 
 | | |
 | --- | --- |
-| Builds and boots | yes, verified under KVM and on hardware |
-| Front panel handshake | yes, verified on hardware |
-| Front panel buttons | yes, all nine, verified on hardware |
+| Boots on the real unit from CF | yes |
+| Ethernet + DHCP | yes |
+| telnet / ssh access | yes |
+| Front panel handshake | yes |
+| Front panel buttons | yes, all nine navigation and transport keys |
 | Front panel display | **untested** |
-| Audio out | **untested** — no Juli@ in a VM, not yet tried on the unit |
+| Juli@ detected by ALSA | yes, `snd-ice1724` binds on hardware |
+| Playback to S/PDIF | **untested** |
 | Watchdog | driver builds in, `/dev/watchdog` not yet confirmed on hardware |
 | Web UI, A/B updates | not started, Phase 2 and 4 |
 
@@ -87,9 +90,9 @@ and then stops at the bootloader prompt.
 BusyBox fragment, rootfs overlay and genimage config, builds everything, and
 produces `output/slmp-build/buildroot-2025.02.9/output/images/sdcard.img`.
 
-Everything it generates lives under `output/`, which is gitignored. The script
-is the source of truth for the configuration: it regenerates all of that on
-every run.
+Everything it generates lives under `output/`, which is gitignored and can be
+deleted at any time. The configuration itself is tracked: `configs/` and
+`board/slmp/` are real files, not generated ones.
 
 ### Rebuilding after a change
 
@@ -101,10 +104,12 @@ make -C output/slmp-build/buildroot-2025.02.9
 ./phase\ 1.sh
 ```
 
-Prefer `make -C` while iterating. Running the script wipes and regenerates the
-rootfs overlay and re-applies the defconfig, so any `menuconfig` work or hand
-edits under `output/slmp-build/board/` are discarded. If you want a config
-change to survive, put it in `phase 1.sh`, not in `menuconfig`.
+Prefer `make -C` while iterating. Running the script re-copies the defconfig
+and re-applies it, so `menuconfig` work is discarded — put config changes in
+`configs/slmp_defconfig`, not in `menuconfig`.
+
+Edits to anything under `board/slmp/` need no script run at all: it is
+symlinked into the Buildroot tree, so `make -C` picks them up directly.
 
 ### Environment overrides
 
@@ -158,9 +163,13 @@ Login is `root` / `slmp`.
 
 ## The front panel
 
-`src/panel/bdp-panel.c`. Protocol reverse-engineered from
-[assets/old_programs/brystonpanel.php](assets/old_programs/brystonpanel.php),
-the stock firmware's panel daemon, then corrected against a real unit.
+`src/panel/bdp-panel.c`. Protocol reverse-engineered from the stock firmware's
+panel daemon (`brystonpanel.php`), then corrected against a real unit.
+
+> That file is third-party Bryston code. It is **not distributed with this
+> repository** — `assets/` is gitignored pending the IP and permission question
+> in [TODO.md](TODO.md). Everything needed to talk to the panel is documented
+> below, so you do not need it.
 
 9600 8N1 on `/dev/ttyS1`, raw, no flow control. Three commands out, all
 terminated with **LF then CR — `0A 0D`, in that order, not CRLF**:
@@ -174,6 +183,14 @@ terminated with **LF then CR — `0A 0D`, in that order, not CRLF**:
 Buttons arrive as newline-terminated ASCII: `BDP_POLL` (a continuous
 heartbeat), `BDP_PLAY`, `BDP_PAUSE`, `BDP_STOP`, `BDP_NEXT`, `BDP_PREVIOUS`,
 `BDP_TOGGLE`, `BDP_UP`, `BDP_DOWN`, `BDP_LEFT`, `BDP_RIGHT`, `BDP_SHUTDOWN`.
+
+**There are no release events.** The panel sends one token per press and
+repeats that token while the button is held; release is inferred from
+`BDP_POLL` resuming. So `POLL` after `BDP_NEXT` is a tap, and `BDP_NEXT` after
+`BDP_NEXT` is a hold. The stock firmware uses exactly this to make a tap skip
+tracks and a hold seek within one — which is also why it acts on release
+rather than on press. Hold-to-confirm and scroll-repeat are built on repeat
+detection, not on release detection.
 
 Line 2's first byte is conventionally a status icon: `0x91` play, `0x92` stop,
 `0x93` pause, `0x95` directory, `0x96` file.
@@ -241,14 +258,33 @@ the image is always current with the source.
 ## Repo layout
 
 ```
-phase 1.sh                        Phase 1 build. Source of truth for the config.
-docs/project_proposal.md          Rationale, architecture, phase plan.
-TODO.md                           What is left.
+phase 1.sh                        Orchestration: fetch, link, validate, build.
+configs/slmp_defconfig            Buildroot configuration.
+board/slmp/
+  linux.fragment                  Kernel config on top of i386_defconfig.
+  busybox.fragment                BusyBox config deltas (telnetd).
+  genimage.cfg                    Disk image layout.
+  syslinux.cfg                    Bootloader config and kernel command line.
+  post-build.sh                   Cross-compiles src/panel into the target.
+  post-image.sh                   Runs genimage, then makes the image bootable.
+  rootfs-overlay/                 Files dropped into the target filesystem:
+    etc/inittab  etc/fstab  etc/mpd.conf  etc/network/interfaces
+    etc/init.d/S01panel  etc/init.d/S30alsa  etc/default/bdp-panel
 src/panel/bdp-panel.c             Front panel link.
 src/panel/Makefile                Host and cross builds.
-assets/old_programs/              Stock firmware sources, for reference.
+docs/project_proposal.md          Rationale, architecture, phase plan.
+TODO.md                           What is left.
+assets/old_programs/              Stock firmware sources. Gitignored, not distributed.
 output/                           Build tree. Gitignored, regenerable.
 ```
+
+Everything that makes this image what it is is an ordinary file under
+`board/slmp/` or `configs/`. Change `mpd.conf`, commit `mpd.conf`, and the diff
+says so. `phase 1.sh` symlinks `board/slmp` into the Buildroot tree and copies
+the defconfig in, so the paths in `configs/slmp_defconfig` are relative to the
+Buildroot tree exactly as every upstream Buildroot defconfig is.
+
+`output/slmp-build/board/` no longer exists — it was generated, and it is gone.
 
 ---
 
@@ -285,5 +321,5 @@ checks too.
 
 ## Licence
 
-See [LICENSE](LICENSE). `assets/old_programs/` contains third-party code
-included for reference and is not covered by it.
+See [LICENSE](LICENSE). `assets/old_programs/` contains third-party Bryston
+code, is not covered by it, and is gitignored rather than redistributed.

@@ -57,21 +57,30 @@ the panel handshaking and reporting button presses.
 - [x] ~~telnetd on port 23.~~
 - [x] ~~Panel handshake accepted, all nine navigation and transport buttons
       reporting.~~
+- [x] ~~Geode LX confirmed on silicon.~~ family 5 model 0xa, 498 MHz, and
+      `/proc/cpuinfo` flags show `cmov mmx mmxext 3dnow 3dnowext` with **no SSE
+      of any kind**. Geode AES engine and hardware RNG both initialise.
+- [x] ~~MPD decodes and drives the card.~~ Verified with an HTTP stream:
+      `pcm0p` reaches `RUNNING` with `hw_ptr` advancing.
+- [x] ~~ESI Juli@ detected by ALSA, at card index 0.~~ `snd-ice1724` binds, the
+      card shows in `alsamixer`, and `aplay -l` confirms `hw:0,0` — so the
+      index `mpd.conf` had guessed is correct. Says nothing yet about whether
+      audio reaches the S/PDIF output.
 
 ### Blocked on a real unit
 
-- [ ] **Audio.** Nothing about the audio path has been tested. Run `aplay -l`,
-      confirm the Juli@ card index, and fix `hw:0,0` in the overlay's
-      `mpd.conf` if it is wrong. Then actually play something to S/PDIF.
+- [ ] **Confirm S/PDIF output now that `mpd.conf` points at `hw:0,1`.** MPD was
+      playing happily to `hw:0,0`, the analog PCM, which produced no sound on
+      the coax output. Needs a reflash and a listen.
+- [ ] **Watchdog: verify `acpi_enforce_resources=lax` creates `/dev/watchdog`.**
+      Root-caused but untested — needs a reflash and a reboot.
 - [ ] **USB DAC output.** Second `audio_output` block in `mpd.conf` is written
       but commented out. Enable and test.
 - [ ] **`alsactl` mixer restore.** `S30alsa` restores `/etc/asound.state` if it
       exists, and nothing creates that file yet. On a running unit:
       `alsactl -f /etc/asound.state store`, copy the result into the overlay in
       `phase 1.sh`, rebuild. Until then the Juli@ probably comes up muted.
-- [ ] **Watchdog.** `CONFIG_GEODE_WDT` is compiled in and its `MFD_CS5535` and
-      `CS5535_MFGPT` dependencies are satisfied, but `/dev/watchdog` has never
-      been confirmed present on hardware. Check `dmesg | grep -i geode`.
+<!-- watchdog: root-caused, fix applied, verification listed above -->
 - [ ] **Identify which ethernet driver actually bound.** Networking works, so
       this is now a trimming question rather than a functional one. `lspci` on
       the unit, then cut `linux.fragment` down to the one that matters.
@@ -88,6 +97,11 @@ Leave it until the unit boots reliably — it is what makes KVM testing possible
 
 ### Build system
 
+- [x] ~~Get the config out of the build script.~~ `board/slmp/` and
+      `configs/slmp_defconfig` are tracked files now; `phase 1.sh` dropped from
+      1162 lines to 535 and holds no config. Verified byte-equivalent: the
+      rootfs file list is identical and the only content difference is
+      `/etc/shadow`, whose salt is random per build.
 - [ ] **Stop rebuilding the kernel on every script run.** `phase 1.sh` rewrites
       `linux.fragment` and `busybox.fragment` unconditionally; the new mtime
       makes Buildroot reconfigure and relink both. Write-if-changed would make

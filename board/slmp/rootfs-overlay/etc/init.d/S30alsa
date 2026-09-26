@@ -1,0 +1,18 @@
+#!/bin/sh
+# Restore the ALSA mixer state baked into the image.
+case "$1" in
+    start)
+        [ -f /etc/asound.state ] || exit 0
+        printf 'Restoring ALSA mixer state: '
+        if /usr/sbin/alsactl -f /etc/asound.state restore; then
+            echo OK
+        else
+            echo FAIL
+        fi
+        ;;
+    stop|restart|reload)
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart}"; exit 1
+        ;;
+esac

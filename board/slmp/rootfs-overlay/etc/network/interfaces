@@ -1,0 +1,7 @@
+auto lo
+iface lo inet loopback
+
+# Ethernet always falls back to DHCP regardless of stored config.
+# One of the three mandatory bootstrap escape hatches.
+auto eth0
+iface eth0 inet dhcp

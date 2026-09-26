@@ -1,0 +1,99 @@
+# --- CPU ---------------------------------------------------------------
+# The single most important line in this file. Anything else emits NOPL
+# and the board dies with an illegal instruction during early boot.
+CONFIG_MGEODE_LX=y
+CONFIG_X86_32=y
+# 256MB of RAM, so no highmem. NOHIGHMEM is the choice member that has
+# to be turned ON: "# CONFIG_HIGHMEM4G is not set" on its own just lets
+# kconfig fall back to the choice default, which is HIGHMEM4G again.
+CONFIG_NOHIGHMEM=y
+# CONFIG_SMP is not set
+# Legacy BIOS only. i386_defconfig turns EFI and the EFI stub on.
+# CONFIG_EFI is not set
+
+# --- Storage -----------------------------------------------------------
+# CF card is on the CS5536 PATA channel in True IDE mode.
+CONFIG_ATA=y
+CONFIG_ATA_SFF=y
+CONFIG_ATA_BMDMA=y
+CONFIG_PATA_CS5536=y
+CONFIG_PATA_AMD=y
+CONFIG_BLK_DEV_SD=y
+CONFIG_EXT4_FS=y
+CONFIG_VFAT_FS=y
+CONFIG_NLS_CODEPAGE_437=y
+CONFIG_NLS_ISO8859_1=y
+CONFIG_TMPFS=y
+
+# --- Audio -------------------------------------------------------------
+CONFIG_SOUND=y
+CONFIG_SND=y
+CONFIG_SND_PCI=y
+# ESI Juli@ (Envy24HT / ICE1724). The Juli@-specific quirk code lives
+# inside this driver.
+CONFIG_SND_ICE1724=y
+# USB DAC path.
+CONFIG_SND_USB=y
+CONFIG_SND_USB_AUDIO=y
+# i386_defconfig enables HD-audio. Nothing here has an HDA codec, but
+# whichever driver registers first takes card index 0 and mpd.conf names
+# the card by index. Remove the possibility.
+# CONFIG_SND_HDA_INTEL is not set
+
+# --- USB ---------------------------------------------------------------
+CONFIG_USB=y
+CONFIG_USB_EHCI_HCD=y
+CONFIG_USB_OHCI_HCD=y
+CONFIG_USB_STORAGE=y
+# The CS5536 has OHCI and EHCI. Nothing else.
+# CONFIG_USB_XHCI_HCD is not set
+# CONFIG_USB_UHCI_HCD is not set
+
+# --- Serial ------------------------------------------------------------
+# The front panel link. There is deliberately no getty on it.
+CONFIG_SERIAL_8250=y
+CONFIG_SERIAL_8250_CONSOLE=y
+CONFIG_SERIAL_8250_NR_UARTS=4
+CONFIG_SERIAL_8250_RUNTIME_UARTS=4
+
+# --- Watchdog ----------------------------------------------------------
+# CS5536 hardware watchdog. The panel daemon pets this from its main
+# loop once it exists.
+#
+# GEODE_WDT depends on CS5535_MFGPT, which depends on MFD_CS5535. Set
+# CONFIG_GEODE_WDT on its own and kconfig drops it without a word, and
+# the first sign of trouble is a Phase 3 panel daemon opening
+# /dev/watchdog and getting ENOENT.
+CONFIG_WATCHDOG=y
+CONFIG_MFD_CS5535=y
+CONFIG_CS5535_MFGPT=y
+CONFIG_GEODE_WDT=y
+
+# --- Geode crypto ------------------------------------------------------
+# The LX has a dedicated AES block. Not AES-NI, but far better than
+# software AES on a 500MHz core.
+CONFIG_CRYPTO=y
+CONFIG_CRYPTO_DEV_GEODE=y
+CONFIG_HW_RANDOM=y
+CONFIG_HW_RANDOM_GEODE=y
+
+# --- Networking --------------------------------------------------------
+CONFIG_NET=y
+CONFIG_INET=y
+CONFIG_PACKET=y
+# Shotgun approach until lspci on a real unit says which one it is.
+# Trim to the one that matters; every driver here is dead weight.
+CONFIG_NET_VENDOR_VIA=y
+CONFIG_VIA_RHINE=y
+CONFIG_NET_VENDOR_REALTEK=y
+CONFIG_8139TOO=y
+CONFIG_R8169=y
+CONFIG_NET_VENDOR_NATSEMI=y
+CONFIG_NATSEMI=y
+
+# --- Trim --------------------------------------------------------------
+# No DRM and no fbdev. The VGA text console has no prompt on x86 and
+# stays on by default, which is all console=tty0 needs.
+# CONFIG_DRM is not set
+# CONFIG_FB is not set
+# CONFIG_SOUND_OSS_CORE is not set

@@ -1,0 +1,104 @@
+# --- Target architecture ----------------------------------------------
+BR2_i386=y
+BR2_x86_geode=y
+
+# --- Toolchain ---------------------------------------------------------
+# musl for size. MPD is C++17 so C++ support is not optional.
+# GCC version deliberately left at Buildroot's default.
+BR2_TOOLCHAIN_BUILDROOT_MUSL=y
+BR2_TOOLCHAIN_BUILDROOT_CXX=y
+
+# BR2_DL_DIR is deliberately absent. It is machine-specific, and the
+# BR2_DL_DIR environment variable overrides the config item anyway, so
+# phase 1.sh exports it to a path outside the Buildroot tree. That way
+# deleting and re-extracting Buildroot does not re-download a gigabyte
+# of tarballs.
+
+# --- System ------------------------------------------------------------
+BR2_TARGET_GENERIC_HOSTNAME="slmp"
+BR2_TARGET_GENERIC_ISSUE="super_lite_music_player"
+BR2_INIT_BUSYBOX=y
+# devtmpfs alone gives no hotplug helper and no /etc/mdev.conf. mdev is
+# what the proposal commits to, and its firmware loader is what Phase 3
+# needs for USB WiFi blobs.
+BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_MDEV=y
+BR2_TARGET_GENERIC_GETTY_PORT="tty1"
+BR2_TARGET_GENERIC_ROOT_PASSWD="slmp"
+BR2_ROOTFS_OVERLAY="board/slmp/rootfs-overlay"
+BR2_ROOTFS_POST_BUILD_SCRIPT="board/slmp/post-build.sh"
+BR2_ROOTFS_POST_IMAGE_SCRIPT="board/slmp/post-image.sh"
+# telnetd on port 23. Plaintext, so this is a wired-LAN bench
+# convenience, not a way in from anywhere untrusted.
+BR2_PACKAGE_BUSYBOX_CONFIG_FRAGMENT_FILES="board/slmp/busybox.fragment"
+# Network config comes from the overlay, not from BR2_SYSTEM_DHCP.
+
+# --- Kernel ------------------------------------------------------------
+BR2_LINUX_KERNEL=y
+BR2_LINUX_KERNEL_CUSTOM_VERSION=y
+# Kept in step with KERNEL_VERSION in phase 1.sh, which rewrites both
+# this and the headers series below if you override it.
+BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE="6.6.100"
+BR2_LINUX_KERNEL_DEFCONFIG="i386"
+BR2_LINUX_KERNEL_USE_DEFCONFIG=y
+BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="board/slmp/linux.fragment"
+BR2_LINUX_KERNEL_BZIMAGE=y
+# Headers come from the kernel being built, and the series has to be
+# stated separately because a custom version tells kconfig nothing.
+BR2_KERNEL_HEADERS_AS_KERNEL=y
+BR2_PACKAGE_HOST_LINUX_HEADERS_CUSTOM_6_6=y
+
+# --- Filesystem --------------------------------------------------------
+BR2_TARGET_ROOTFS_EXT2=y
+BR2_TARGET_ROOTFS_EXT2_4=y
+BR2_TARGET_ROOTFS_EXT2_SIZE="400M"
+BR2_TARGET_ROOTFS_TAR=y
+
+# --- Bootloader --------------------------------------------------------
+# No BR2_TARGET_SYSLINUX. It installs nothing into the target, Buildroot
+# deletes the one host binary it builds because that binary is
+# cross-compiled, and it pulls target util-linux + libuuid into the
+# rootfs for nothing. The boot bits come from the host's own syslinux
+# package so that ldlinux.sys and ldlinux.c32 are the same version.
+# Phase 4's on-device "syslinux --once" writer is a BR2_EXTERNAL
+# package, not this symbol.
+
+# --- Audio -------------------------------------------------------------
+BR2_PACKAGE_ALSA_UTILS=y
+BR2_PACKAGE_ALSA_UTILS_ALSACTL=y
+BR2_PACKAGE_ALSA_UTILS_AMIXER=y
+BR2_PACKAGE_ALSA_UTILS_APLAY=y
+# speaker-test drives the card directly, which is the only way to tell
+# "ALSA cannot reach the hardware" apart from "MPD is misconfigured".
+BR2_PACKAGE_ALSA_UTILS_SPEAKER_TEST=y
+# iecset reads and sets the IEC958 status bits on the S/PDIF output.
+BR2_PACKAGE_ALSA_UTILS_IECSET=y
+
+BR2_PACKAGE_MPD=y
+BR2_PACKAGE_MPD_ALSA=y
+BR2_PACKAGE_MPD_FLAC=y
+BR2_PACKAGE_MPD_VORBIS=y
+BR2_PACKAGE_MPD_MPG123=y
+BR2_PACKAGE_MPD_WAVPACK=y
+BR2_PACKAGE_MPD_CURL=y
+
+# --- Diagnostics -------------------------------------------------------
+BR2_PACKAGE_PCIUTILS=y
+BR2_PACKAGE_DROPBEAR=y
+BR2_PACKAGE_STRACE=y
+# mpc, for poking at mpd from the console without a web UI. Note the
+# name: BR2_PACKAGE_MPC is GNU MPC, the multiprecision complex library
+# that GCC builds against, and selecting it would drag GMP and MPFR into
+# the image for nothing. The MPD client is BR2_PACKAGE_MPD_MPC.
+#
+# It selects libmpdclient, which Phase 3's panel daemon needs anyway.
+BR2_PACKAGE_MPD_MPC=y
+# No BR2_PACKAGE_USBUTILS: it depends on BR2_PACKAGE_HAS_UDEV because
+# lsusb wants udev's hwdb, and this image uses mdev. BusyBox's own lsusb
+# applet is enabled by default and lists bus/device IDs, which is all
+# Phase 1 needs. Revisit only if a device name database becomes worth
+# dragging eudev in for.
+
+# --- Host tools --------------------------------------------------------
+BR2_PACKAGE_HOST_GENIMAGE=y
+BR2_PACKAGE_HOST_DOSFSTOOLS=y
+BR2_PACKAGE_HOST_MTOOLS=y

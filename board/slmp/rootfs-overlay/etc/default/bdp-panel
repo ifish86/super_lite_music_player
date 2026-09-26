@@ -1,0 +1,16 @@
+# Arguments for /usr/bin/bdp-panel, read by /etc/init.d/S01panel.
+#
+# The defaults compiled into the binary are /dev/ttyS1 and the version
+# string "S3.00 2023-04-08", which is the handshake this panel accepts.
+# Override here to try a different port or version without rebuilding.
+#
+#BDP_PANEL_ARGS="-d /dev/ttyS2"
+#BDP_PANEL_ARGS="-v 'S3.00 2023-04-08'"
+#
+# Send an exact byte sequence instead of the built-in one:
+#BDP_PANEL_ARGS="-X '1C 53 33 2E 30 30 20 32 30 32 33 2D 30 34 2D 30 38 0A 0D'"
+#
+# Terminate commands with LF only instead of LF CR:
+#BDP_PANEL_ARGS="-L"
+
+BDP_PANEL_ARGS=""
