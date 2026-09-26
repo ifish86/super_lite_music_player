@@ -16,13 +16,24 @@ artifacts and unrecoverable without them. **None of this is done.**
 
 - [ ] Image the existing CF cards. Multiple copies, checksummed, stored off site.
 - [ ] Source spare industrial SLC CF cards.
-- [ ] Capture the panel serial protocol in both directions with a logic
-      analyser while a known-good unit still exists. Much of this is now known
-      from the stock PHP plus live testing, but the capture is the only record
-      that survives the unit dying.
-- [ ] Confirm whether buttons send discrete press *and* release events, or one
-      event per press. Hold-to-confirm and scroll-repeat both need releases,
-      and the menu design in Phase 3 depends on the answer.
+- [x] ~~Confirm whether buttons send discrete press *and* release events.~~
+      **Answered.** There are no release events. The panel sends one token per
+      press and *repeats* that token while the button is held; release is
+      inferred from `BDP_POLL` resuming. The stock firmware relies on exactly
+      this in `allThoseOtherCommands()`: `POLL` after `BDP_NEXT` means a tap, so
+      `mpc next`; `BDP_NEXT` after `BDP_NEXT` means held, so seek. Hold-to-
+      confirm and scroll-repeat are therefore implementable via repeat
+      detection rather than release detection.
+- [ ] Measure the repeat rate of a held button, which sets scroll and seek
+      speed. The stock loop polls every 75 ms, which bounds it but does not
+      give the panel's actual rate.
+- [ ] Observe `BDP_TOGGLE` and `BDP_SHUTDOWN` live. The other nine tokens have
+      been seen on hardware; these two have not.
+- [ ] Capture the link with a logic analyser while a known-good unit still
+      exists. Lower priority than it was — the protocol is understood and
+      working — but it is still the only record that survives the unit dying,
+      and it is the only way to answer whether the framing carries checksums
+      and whether button events can arrive mid-write during a display update.
 - [ ] Resolve the IP and permission question before anything is published.
       Firmware source ownership, trademark use, and what is implicitly
       promised to customers. Settle it in writing.
@@ -33,6 +44,19 @@ artifacts and unrecoverable without them. **None of this is done.**
 
 Builds, boots, and the panel works. What remains is almost entirely
 verification on hardware.
+
+### Confirmed working on hardware
+
+The unit boots from CF, gets a DHCP lease, and is reachable over telnet, with
+the panel handshaking and reporting button presses.
+
+- [x] ~~Boots on the real unit from CompactFlash.~~ Implies the CF enumerates
+      through `PATA_CS5536` and the ext4 root mounts read-only as configured.
+- [x] ~~Ethernet and DHCP.~~ One of the shotgun drivers binds the real chip.
+      Which one is still unknown — see trimming below.
+- [x] ~~telnetd on port 23.~~
+- [x] ~~Panel handshake accepted, all nine navigation and transport buttons
+      reporting.~~
 
 ### Blocked on a real unit
 
@@ -48,10 +72,9 @@ verification on hardware.
 - [ ] **Watchdog.** `CONFIG_GEODE_WDT` is compiled in and its `MFD_CS5535` and
       `CS5535_MFGPT` dependencies are satisfied, but `/dev/watchdog` has never
       been confirmed present on hardware. Check `dmesg | grep -i geode`.
-- [ ] **Identify the real ethernet chip.** `lspci` on the unit, then trim
-      `linux.fragment` to just that driver.
-- [ ] **Confirm the CF enumerates as `/dev/sda`** via `PATA_CS5536`. Under KVM
-      the disk was found through `ATA_PIIX`, so this path is still untested.
+- [ ] **Identify which ethernet driver actually bound.** Networking works, so
+      this is now a trimming question rather than a functional one. `lspci` on
+      the unit, then cut `linux.fragment` down to the one that matters.
 
 ### Image trimming
 
@@ -112,11 +135,14 @@ proper is still to come.
       Leave it running and find out.
 - [ ] **Does re-sending the enable command do anything bad?** Determines whether
       a restarted daemon can safely re-handshake.
-- [ ] Confirm `/dev/ttyS1` against `/dev/ttyS2`. The stock PHP reads the port
-      from `/dev/shm/fpInt` and only falls back to `ttyS2`, which suggests it
-      probes rather than assumes.
+- [x] ~~Confirm the panel port.~~ `/dev/ttyS1`, verified on hardware. The stock
+      PHP reads it from `/dev/shm/fpInt` and only falls back to `ttyS2`, which
+      is why it never cared.
 - [ ] Check `BDP_SHUTDOWN` behaviour. The stock firmware runs everything in
-      `/shutdownTasks` when it arrives.
+      `/shutdownTasks` and then `shutdown -h now`.
+- [ ] Decide tap-versus-hold semantics. The stock firmware fires `mpc next` on
+      *release*, not on press, so that a tap skips and a hold seeks. Worth
+      keeping; it is not obvious from the outside.
 
 ### Daemon work
 
