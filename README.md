@@ -20,8 +20,11 @@ architecture and phase plan. [TODO.md](TODO.md) is what is actually left to do.
 
 ## Status
 
-Phase 1 (base image) builds and boots. The front panel link works on real
-hardware. Most of the audio path has never been tested on a real unit.
+Phase 1 boots and Phase 2 runs. A real BDP-1 currently serves the myMPD web
+UI, keeps its settings across a reboot and has a working watchdog. What has
+never been verified on hardware is anything that makes a noise: no audio has
+come out of the S/PDIF socket yet, and the front panel display has never been
+seen to show a character.
 
 | | |
 | --- | --- |
@@ -39,6 +42,7 @@ hardware. Most of the audio path has never been tested on a real unit.
 | MPD running | yes |
 | Web UI (myMPD) | yes, serves on port 80 in 15 ms and talks to MPD |
 | USB drive automount | builds, **never had a drive plugged into a real unit** |
+| SMB network shares | builds, **never mounted a real share** |
 | UPnP/OpenHome renderer | upmpdcli builds and is in the image, **never run** |
 | A/B updates | not started, Phase 4 |
 
@@ -66,17 +70,32 @@ watchdog timer, and a certificate store myMPD refuses to start without.
 ## What is in the image
 
 Linux 6.6 LTS built `-march=geode`, BusyBox userland and init, MPD 0.23,
-myMPD 26 for the web UI, dropbear, telnetd, and `bdp-panel`. Root is ext4
-mounted read-only. Things that write and matter — settings, SSH host keys, the
-MPD database — go to a third partition mounted at `/data`; things that write
-and do not matter go to tmpfs. That split is what keeps the CF card alive.
+myMPD 26 for the web UI, upmpdcli as a UPnP/OpenHome renderer, dropbear,
+telnetd, and `bdp-panel`. Root is ext4 mounted read-only. Things that write and
+matter — settings, SSH host keys, the MPD database — go to a third partition
+mounted at `/data`; things that write and do not matter go to tmpfs. That split
+is what keeps the CF card alive.
 
-USB drives mount themselves read-only under `/media`, which is also MPD's
-music directory. FAT, exFAT, NTFS and ext4 are all built into the kernel.
+Music comes from three places, all of which appear to MPD as ordinary folders
+under `/media`, which is its `music_directory`:
+
+- **USB drives**, mounted read-only as they are plugged in. FAT, exFAT, NTFS
+  and ext4 are all in the kernel.
+- **SMB shares**, listed in `/etc/default/shares` and mounted by the kernel.
+  MPD's own SMB storage plugin cannot be built here — it needs samba4, which
+  Buildroot will not build against musl — so `smb://` in myMPD's mount dialog
+  will never work. [docs/storage.md](docs/storage.md) has the detail.
+- **Anything a UPnP control point pushes**, via upmpdcli. That is the
+  proposal's answer to abandoning streaming services: the control point deals
+  with Tidal or Qobuz and sends the result here.
+
+Decoders are MPD's own for FLAC, MP3, Ogg and WavPack, faad2 for AAC, and
+ffmpeg as the catch-all for ALAC, WMA and everything else — because a renderer
+plays whatever is pushed at it, not what the library happens to hold.
 
 Buildroot 2025.02.9 builds the toolchain and packages. The resulting
 `sdcard.img` is ~465 MB: a 64 MB FAT32 boot partition at 1 MiB offset, a
-400 MB ext4 root of which about 46 MB is occupied, and an 8 MB placeholder for
+400 MB ext4 root of which about 83 MB is occupied, and an 8 MB placeholder for
 the data partition. On first boot that last one grows to fill the card —
 leaving 400 MB free at the end for the Phase 4 B slot — and gets a filesystem
 made in it. [docs/storage.md](docs/storage.md) is the write-up.
@@ -172,14 +191,18 @@ Windows side and use balenaEtcher, Rufus in DD mode, or Win32DiskImager:
 cp output/slmp-build/buildroot-2025.02.9/output/images/sdcard.img /mnt/c/Users/$USER/Downloads/
 ```
 
-The image is sparse: 465 MB apparent, ~33 MB allocated. `du` without
-`--apparent-size` will understate it.
+The image is sparse: 465 MB apparent, ~66 MB allocated. `du` without
+`--apparent-size` will understate it, and what gets written to the card is the
+apparent figure.
 
 ---
 
 ## Getting into a running unit
 
-Login is `root` / `slmp`.
+The web UI is `http://<ip>/`, with no login. The unit also advertises itself
+to UPnP control points as **BDP-1**.
+
+For a shell, login is `root` / `slmp`.
 
 - **Serial/VGA console** — getty on tty1. Deliberately not on the panel UART.
 - **telnet** — port 23, starts automatically. Plaintext, so wired LAN only.
@@ -371,6 +394,9 @@ br2-external/                     Buildroot external tree: packages that are
   external.desc external.mk       ours rather than upstream's.
   Config.in
   package/mympd/                  myMPD, built from the src/mympd submodule.
+  patches/<package>/              Patches against *upstream* Buildroot
+                                  packages, via BR2_GLOBAL_PATCH_DIR, so
+                                  none of them has to be forked.
 board/slmp/
   linux.fragment                  Kernel config on top of i386_defconfig.
   busybox.fragment                BusyBox config deltas (telnetd).
@@ -379,20 +405,24 @@ board/slmp/
   post-build.sh                   Cross-compiles src/panel into the target.
   post-image.sh                   Runs genimage, then makes the image bootable.
   mdev-usb.conf                   USB automount rule, appended to mdev.conf.
-  rootfs-overlay/                 Files dropped into the target filesystem:
-    etc/inittab  etc/fstab  etc/mpd.conf  etc/network/interfaces
-    etc/init.d/S01panel  etc/init.d/S30alsa  etc/default/bdp-panel
-    etc/init.d/S03data   etc/init.d/S11usb  etc/dropbear -> /data/dropbear
-    etc/init.d/S96mympd  etc/default/mympd
-    usr/sbin/slmp-usb-mount
-src/panel/bdp-panel.c             Front panel link.
+  rootfs-overlay/                 Files dropped into the target filesystem.
+    etc/inittab  etc/fstab  etc/network/interfaces
+    etc/mpd.conf  etc/upmpdcli.conf  etc/default/shares
+    etc/default/bdp-panel  etc/default/mympd
+    etc/init.d/     S01panel  S03data  S11usb  S30alsa
+                    S45shares  S96mympd
+                    (S99upmpdcli comes from Buildroot's own package)
+    etc/dropbear      -> /data/dropbear
+    var/lib/mympd     -> /data/mympd
+    usr/sbin/       slmp-usb-mount  slmp-mount-share
+src/panel/bdp-panel.c             Front panel link and MPD front end.
 src/panel/Makefile                Host and cross builds.
 src/mympd/                        myMPD. Git submodule, not our code.
 docs/project_proposal.md          Rationale, architecture, phase plan.
 docs/mympd.md                     How myMPD was integrated, and why each
                                   build option is the way it is.
-docs/storage.md                   The data partition, first-boot growth, and
-                                  USB automount.
+docs/storage.md                   The data partition, first-boot growth,
+                                  USB automount and network shares.
 TODO.md                           What is left.
 assets/old_programs/              Stock firmware sources. Gitignored, not distributed.
 output/                           Build tree. Gitignored, regenerable.
@@ -415,6 +445,17 @@ symlinked into the Buildroot tree, so
 `make -C output/slmp-build/buildroot-2025.02.9` picks them up with no sync step.
 The one exception is `configs/slmp_defconfig`: the script copies that in and
 applies it, so a change there needs `./phase\ 1.sh`.
+
+Two other ways in, for the cases these recipes do not cover:
+
+- **An upstream Buildroot package that does not build.** Drop a patch in
+  `br2-external/patches/<package>/`. `BR2_GLOBAL_PATCH_DIR` points there, and
+  Buildroot applies it on top of its own. `patches/upmpdcli/` is the worked
+  example: 1.5.12 does not compile against GCC 13.
+- **Changing a package's sub-options.** Edit the defconfig, then
+  `make -C <buildroot> <pkg>-dirclean` before rebuilding. Buildroot will not
+  rebuild a package just because its configuration changed, and the failure
+  mode is a build that succeeds with the feature missing.
 
 ### Adding a BusyBox applet
 

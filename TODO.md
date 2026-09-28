@@ -52,8 +52,8 @@ the panel handshaking and reporting button presses.
 
 - [x] ~~Boots on the real unit from CompactFlash.~~ Implies the CF enumerates
       through `PATA_CS5536` and the ext4 root mounts read-only as configured.
-- [x] ~~Ethernet and DHCP.~~ One of the shotgun drivers binds the real chip.
-      Which one is still unknown — see trimming below.
+- [x] ~~Ethernet and DHCP.~~ `lspci` says VIA VT6105M [Rhine-III] at 00:0d.0,
+      so `VIA_RHINE` is the driver and the shotgun has been removed.
 - [x] ~~telnetd on port 23.~~
 - [x] ~~Panel handshake accepted, all nine navigation and transport buttons
       reporting.~~
@@ -62,10 +62,11 @@ the panel handshaking and reporting button presses.
       of any kind**. Geode AES engine and hardware RNG both initialise.
 - [x] ~~MPD decodes and drives the card.~~ Verified with an HTTP stream:
       `pcm0p` reaches `RUNNING` with `hw_ptr` advancing.
-- [x] ~~ESI Juli@ detected by ALSA, at card index 0.~~ `snd-ice1724` binds, the
-      card shows in `alsamixer`, and `aplay -l` confirms `hw:0,0` — so the
-      index `mpd.conf` had guessed is correct. Says nothing yet about whether
-      audio reaches the S/PDIF output.
+- [x] ~~ESI Juli@ detected by ALSA, at card index 0.~~ `snd-ice1724` binds and
+      `aplay -l` on the unit reports exactly what `mpd.conf` assumed: card 0
+      device 0 is `ICE1724`, card 0 device 1 is `ICE1724 IEC958`, and nothing
+      else claims an index. So `hw:0,1` addresses the right thing. Says
+      nothing yet about whether audio reaches the S/PDIF socket.
 
 ### Blocked on a real unit
 
@@ -133,14 +134,21 @@ Leave it until the unit boots reliably — it is what makes KVM testing possible
 
 ## Phase 2: Web UI
 
-- [x] myMPD integrated. Buildroot package in `br2-external/package/mympd/`,
-      built from the `src/mympd` submodule, served on port 80, started from
-      `S96mympd`. Builds clean for the Geode; **not yet run on hardware**.
-      See [docs/mympd.md](docs/mympd.md).
-- [ ] Outbound-HTTPS features turned off: lyrics fetching, ListenBrainz,
-      fanart, webradio directory. myMPD 26 has no build options for these
-      individually - they are runtime settings, so this is a matter of
-      finding the right names and putting them in `/etc/default/mympd`.
+- [x] myMPD integrated and **running on a real BDP-1**. Buildroot package in
+      `br2-external/package/mympd/`, built from the `src/mympd` submodule,
+      served on port 80 from `S96mympd`. It answers in 15 ms, the JSON-RPC
+      API returns live MPD state, and settings land in `/data/mympd/config`.
+      Getting there took three hardware rounds; see
+      [docs/mympd.md](docs/mympd.md).
+- [x] Outbound HTTPS off. `MYMPD_WEBRADIODB=false` stops the one feature that
+      phones home by itself, and the script-driven ones - lyrics fetching,
+      ListenBrainz, fanart - cannot run at all because Lua is compiled out.
+      `MYMPD_CERT_CHECK=false` is also required, not optional: without a CA
+      bundle myMPD treats a missing certificate store as a fatal startup
+      error and exits after binding port 80.
+- [ ] Decide what happens when Phase 4 brings a pinned certificate. That is
+      the point at which `ca_cert_store` has something real to point at and
+      `cert_check` could go back on.
 - [x] myMPD's settings persist. Work directory is `/data/mympd` on the
       data partition; the cache stays on tmpfs so cover art cannot wear
       the card. See [docs/storage.md](docs/storage.md).
@@ -199,8 +207,10 @@ Leave it until the unit boots reliably — it is what makes KVM testing possible
 
 ## Phase 3: Panel daemon
 
-`src/panel/bdp-panel.c` is the link layer and proves the protocol. The daemon
-proper is still to come.
+`src/panel/bdp-panel.c` is the link layer, and now also the player front end:
+it follows MPD over `libmpdclient` and maps the transport keys onto it. What
+is still to come is the menu tree, the settings web UI and the watchdog - the
+three things proposal 4.4 puts in the same process.
 
 ### Protocol gaps
 
@@ -208,9 +218,11 @@ proper is still to come.
       terminator is confirmed for the enable command only; it is applied to
       line 1 and line 2 on the assumption that framing is uniform. `-L` sends
       LF alone if that assumption is wrong.
-- [ ] **Line width.** Unknown. Nothing in the stock PHP truncates, so
-      `bdp-panel` does not either. Find the real width and decide whether to
-      truncate or scroll.
+- [ ] **Line width.** Unknown, and deliberately not guessed at: an over-long
+      line just runs off the end, so `bdp-panel` clips nothing by default and
+      the unknown costs nothing today. It is needed for scrolling, which does
+      have to know where the end is. Measure it with
+      `bdp-panel -1 '....5...10...15...20...25'` and count, then set `-w`.
 - [ ] **Is the handshake a one-shot or a keepalive?** If the panel needs
       re-arming periodically, a daemon that dies takes the unit down with it.
       Leave it running and find out.
@@ -221,9 +233,18 @@ proper is still to come.
       is why it never cared.
 - [ ] Check `BDP_SHUTDOWN` behaviour. The stock firmware runs everything in
       `/shutdownTasks` and then `shutdown -h now`.
-- [ ] Decide tap-versus-hold semantics. The stock firmware fires `mpc next` on
-      *release*, not on press, so that a tap skips and a hold seeks. Worth
-      keeping; it is not obvious from the outside.
+- [x] ~~Decide tap-versus-hold semantics.~~ Decided: act on the **press**, and
+      suppress the repeats the panel sends while a button is held, so one
+      press is one action. `BDP_POLL` resuming is what re-arms. PTY-tested -
+      five NEXTs with no POLL between produce one skip.
+
+      This gives up what the stock firmware bought by acting on *release*:
+      it could tell a tap from a hold and turn a held NEXT into a seek.
+      Skipping reliably is worth more than an unimplemented seek, but adding
+      seek later means going back to release-based handling, so the cost is
+      real rather than theoretical.
+- [ ] Seek on hold, if it turns out to be wanted. See above for what it
+      costs.
 
 ### Daemon work
 
@@ -244,8 +265,7 @@ proper is still to come.
 - [ ] Scrolling long titles on a 200-300 ms tick. Nothing is clipped now, so a
       long title runs off the end of the panel; scrolling is what actually
       fixes that, and unlike clipping it does need the real width.
-- [ ] Find the real display width, for scrolling rather than for clipping.
-      `bdp-panel -1 '....5...10...15...20...25'` and count.
+
 - [x] Only write bytes when the rendered line differs from what is on screen.
 - [ ] Settings web UI on a separate port, via civetweb. This is where network
       shares belong: myMPD's Mounts page drives MPD's `mount` command and has
@@ -314,6 +334,14 @@ Fine for a bench unit, not fine for anything else. Revisit before release.
 - [ ] Root password is `slmp`, baked into the image.
 - [ ] telnetd on port 23, plaintext, enabled by default.
 - [ ] No firewall of any kind.
+- [ ] myMPD serves port 80 as root, and now upmpdcli answers SSDP and HTTP
+      too. Both were accepted deliberately for a LAN appliance - see Phase 2 -
+      but the network-facing surface has grown from "a telnet daemon" to
+      "a web server and a UPnP stack", and that is worth restating rather
+      than leaving implied.
+- [ ] `MYMPD_CERT_CHECK=false`. Harmless while nothing makes an outbound TLS
+      connection, which is the case today. It stops being harmless the moment
+      something does.
 
 ---
 
