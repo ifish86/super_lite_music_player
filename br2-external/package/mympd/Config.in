@@ -1,0 +1,36 @@
+config BR2_PACKAGE_MYMPD
+	bool "mympd"
+	depends on BR2_USE_MMU
+	depends on BR2_TOOLCHAIN_HAS_THREADS
+	select BR2_PACKAGE_OPENSSL
+	select BR2_PACKAGE_PCRE2
+	help
+	  myMPD is a standalone web UI for the Music Player Daemon.
+	  It embeds its own web server, so nothing else is needed to
+	  serve it.
+
+	  Built from the checkout in src/mympd, not from a release
+	  tarball, so the version in the image is whatever that
+	  submodule is pinned to.
+
+	  https://jcorporation.github.io/myMPD/
+
+if BR2_PACKAGE_MYMPD
+
+config BR2_PACKAGE_MYMPD_FLAC
+	bool "flac support"
+	select BR2_PACKAGE_FLAC
+	help
+	  Read albumart and lyrics embedded in FLAC files.
+
+config BR2_PACKAGE_MYMPD_LIBID3TAG
+	bool "libid3tag support"
+	select BR2_PACKAGE_LIBID3TAG
+	help
+	  Read albumart and lyrics embedded in ID3v2 tags.
+
+endif
+
+comment "mympd needs a toolchain w/ threads"
+	depends on BR2_USE_MMU
+	depends on !BR2_TOOLCHAIN_HAS_THREADS

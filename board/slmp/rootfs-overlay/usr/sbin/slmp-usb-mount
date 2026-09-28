@@ -1,0 +1,123 @@
+#!/bin/sh
+#
+# slmp-usb-mount - mount and unmount USB drives as they come and go.
+#
+# Called by mdev with $ACTION set to add or remove and $MDEV set to the
+# device name (sdb1, sdc2, ...). Also usable by hand:
+#
+#     slmp-usb-mount add sdb1
+#     slmp-usb-mount remove sdb1
+#     slmp-usb-mount scan          (everything already plugged in)
+#
+# The scan action exists because mdev only hears about uevents that
+# happen while it is running. Buildroot's S10mdev starts the netlink
+# daemon but never runs "mdev -s", and a drive that was already plugged
+# in when the unit was switched on got its /dev node from devtmpfs
+# without any uevent mdev could see. /etc/init.d/S11usb calls scan once
+# at boot to cover exactly that case.
+#
+# Drives are mounted READ-ONLY, under /media/<label>. Read-only is not
+# timidity: this is an appliance whose drives get pulled without warning
+# and whose users have no way to fsck anything. A read-only mount cannot
+# be corrupted by a yank, needs no journal replay, and works on a drive
+# that was itself unplugged uncleanly from a PC.
+
+ACTION="${1:-$ACTION}"
+DEV="${2:-$MDEV}"
+
+MEDIA=/media
+LOGT=usb
+
+log() { logger -t "$LOGT" "$*" 2>/dev/null || echo "$LOGT: $*"; }
+
+[ "$ACTION" = "scan" ] || [ -n "$DEV" ] || exit 0
+
+# Never touch the card the system boots from.
+case "$DEV" in
+	sda*) exit 0 ;;
+esac
+
+# A label makes for a directory name a person can recognise in the web
+# UI. Fall back to the kernel name when there is none, and sanitise it
+# either way: it comes off a filesystem someone else formatted, so it can
+# contain anything at all, including a slash or a leading dot.
+mount_name() {
+	_label=$(blkid "/dev/$1" 2>/dev/null |
+		sed -n 's/.*[[:space:]]LABEL="\([^"]*\)".*/\1/p')
+	_name=$(printf '%s' "$_label" | tr -c 'A-Za-z0-9._-' '_' | sed 's/^[._]*//')
+	[ -n "$_name" ] || _name="$1"
+	printf '%s' "$_name"
+}
+
+do_add() {
+	_name=$(mount_name "$DEV")
+	_dir="$MEDIA/$_name"
+
+	# Two drives with the same label, or a label that collides with a
+	# name already in use. Fall back to the device name, which is unique.
+	if [ -d "$_dir" ] && mountpoint -q "$_dir"; then
+		_dir="$MEDIA/$DEV"
+	fi
+
+	mkdir -p "$_dir" || { log "cannot create $_dir"; return 1; }
+
+	# No -t: let the kernel work out the filesystem. vfat, exfat, ntfs3
+	# and ext4 are all built in. iocharset is for the FAT family and is
+	# ignored by the others.
+	if mount -o ro,noatime,nosuid,nodev,noexec,iocharset=utf8 \
+	         "/dev/$DEV" "$_dir" 2>/dev/null ||
+	   mount -o ro,noatime,nosuid,nodev,noexec "/dev/$DEV" "$_dir" 2>/dev/null
+	then
+		log "mounted /dev/$DEV at $_dir"
+		# Tell MPD there is new music. It is a no-op if mpd is not up
+		# yet, which is the case when a drive is already plugged in at
+		# boot: S95mpd scans /media itself when it starts.
+		mpc --quiet update >/dev/null 2>&1 || true
+	else
+		log "failed to mount /dev/$DEV"
+		rmdir "$_dir" 2>/dev/null
+		return 1
+	fi
+}
+
+do_remove() {
+	# mdev gives the device name, not the mountpoint, and by the time
+	# this runs the device is already gone - so find the mountpoint by
+	# what is mounted rather than by asking the device.
+	_dir=$(awk -v d="/dev/$DEV" '$1 == d { print $2; exit }' /proc/mounts)
+	[ -n "$_dir" ] || return 0
+
+	# Lazy, because a read-only mount with a reader still on it cannot be
+	# unmounted otherwise, and the drive is physically gone regardless.
+	if umount -l "$_dir" 2>/dev/null; then
+		rmdir "$_dir" 2>/dev/null
+		log "unmounted $_dir"
+		mpc --quiet update >/dev/null 2>&1 || true
+	else
+		log "failed to unmount $_dir"
+	fi
+}
+
+do_scan() {
+	for _sys in /sys/class/block/sd*; do
+		[ -e "$_sys" ] || continue
+		DEV=$(basename "$_sys")
+		# Partitions only, and never the boot card.
+		case "$DEV" in
+			sda*)       continue ;;
+			sd[b-z])    continue ;;
+			sd[b-z][0-9]*) ;;
+			*)          continue ;;
+		esac
+		# Already mounted, from a uevent that beat us here.
+		grep -q "^/dev/$DEV " /proc/mounts && continue
+		do_add
+	done
+}
+
+case "$ACTION" in
+	add)    do_add ;;
+	remove) do_remove ;;
+	scan)   do_scan ;;
+	*)      exit 0 ;;
+esac

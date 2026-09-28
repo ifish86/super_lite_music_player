@@ -81,6 +81,95 @@ BR2_PACKAGE_MPD_MPG123=y
 BR2_PACKAGE_MPD_WAVPACK=y
 BR2_PACKAGE_MPD_CURL=y
 
+# --- Web UI ------------------------------------------------------------
+# myMPD, from the submodule in src/mympd, via the BR2_EXTERNAL tree in
+# br2-external/. It selects openssl and pcre2, which it hard-requires.
+BR2_PACKAGE_MYMPD=y
+# Albumart and lyrics embedded in the files themselves. flac is already
+# in the image for MPD, so that one is free; libid3tag is not, and is
+# about 100 KB.
+BR2_PACKAGE_MYMPD_FLAC=y
+BR2_PACKAGE_MYMPD_LIBID3TAG=y
+# No BR2_PACKAGE_PCRE2_JIT. The JIT generates machine code at runtime,
+# which is exactly the thing the NOPL check in phase 1.sh cannot see,
+# and sljit's x86-32 backend is not something to trust on a CPU this
+# old. The interpreter is fast enough for search patterns.
+
+# --- Patches against upstream Buildroot packages -----------------------
+# Buildroot's own mechanism for this, so no upstream package is forked.
+# Layout is <dir>/<package>/<patch files>. Currently one patch: upmpdcli
+# 1.5.12 does not compile against GCC 13, which no longer pulls in
+# <cstdint> transitively.
+BR2_GLOBAL_PATCH_DIR="$(BR2_EXTERNAL_SLMP_PATH)/patches"
+
+# --- UPnP renderer -----------------------------------------------------
+# upmpdcli makes MPD look like a UPnP/OpenHome renderer, which is how
+# proposal 3.3 answers the streaming-services gap: the control point does
+# Tidal or Qobuz and pushes the result here. It selects libupnpp,
+# libnpupnp, libmicrohttpd, jsoncpp and expat, and unlike the SMB storage
+# plugin none of that chain needs glibc.
+BR2_PACKAGE_UPMPDCLI=y
+
+# ffmpeg, for MPD's decoder of last resort. A renderer plays whatever a
+# control point pushes at it, and MPD's native plugins cover flac, mp3,
+# ogg and wavpack only - no ALAC, no AAC, no WAV, no Opus, which between
+# them are most of what comes off a phone.
+BR2_PACKAGE_MPD_FFMPEG=y
+# The command line tool is default y and useless here: MPD links the
+# libraries. ffplay, ffprobe, swscale and postproc are already off.
+# BR2_PACKAGE_FFMPEG_FFMPEG is not set
+# Encoders, muxers and filters, off. MPD only ever decodes, so all three
+# are dead weight - and an empty string here means --disable-encoders
+# with nothing enabled back, not "default to all".
+BR2_PACKAGE_FFMPEG_ENCODERS=""
+BR2_PACKAGE_FFMPEG_MUXERS=""
+BR2_PACKAGE_FFMPEG_FILTERS=""
+# No external x86 assembly. Buildroot turns it on because the Geode has
+# MMX, and then libavutil fails to link:
+#
+#   ld: libavutil/x86/tx_float.o: relocation in read-only section `.text`
+#   ld: read-only segment has dynamic relocations
+#
+# ffmpeg's nasm-assembled files are not all position-independent on
+# 32-bit x86, and Buildroot puts -ztext in TARGET_LDFLAGS, which forbids
+# text relocations in a shared library.
+#
+# Disabling it costs almost nothing *here* specifically. ffmpeg 6.1's x86
+# assembly is overwhelmingly SSE2 and later, this CPU has no SSE of any
+# kind, and ffmpeg picks its routines from CPUID at runtime - so nearly
+# all of that assembly is unreachable on a Geode whether it is compiled
+# in or not. It also removes a real hazard: that assembly is padded for
+# alignment by nasm, which does not know about -march=geode and can emit
+# the long NOP this CPU faults on.
+#
+# --disable-inline-asm is here for the same reason, one layer down.
+# Without it libavcodec fails the same way:
+#
+#   ld: libavcodec/x86/cavsdsp.o: relocation against `ff_pw_5`
+#       in read-only section `.text`
+#
+# That one is GCC inline assembly rather than nasm, in the CAVS *video*
+# decoder - a codec this device could not use if it wanted to. Disabling
+# the whole class beats disabling video codecs one at a time as each
+# fails to link, and costs little: ffmpeg's audio decoders are C with
+# their DSP in the external assembly that is already gone, and a CPU with
+# no SSE would take the C paths at runtime regardless.
+BR2_PACKAGE_FFMPEG_EXTRACONF="--disable-x86asm --disable-inline-asm"
+
+# faad2 as well, so ffmpeg is not the AAC decoder. MPD prefers its own
+# plugins over the ffmpeg catch-all, and faad2 is a dedicated AAC
+# decoder rather than a general one built with its assembly disabled.
+# AAC is known to play on this hardware - it did under the stock 3.12
+# firmware - so it is worth giving it the better path and leaving ffmpeg
+# for ALAC, WMA and whatever else turns up.
+BR2_PACKAGE_MPD_FAAD2=y
+
+# Decoders, demuxers, parsers and protocols stay at "all". Trimming them
+# to an enumerated list is how you discover a format you forgot about
+# eighteen months later, and the whole point of choosing ffmpeg was
+# coverage. No BR2_PACKAGE_FFMPEG_GPL: the GPL parts are video filters,
+# and LGPL is a simpler licence position for something we redistribute.
+
 # --- Diagnostics -------------------------------------------------------
 BR2_PACKAGE_PCIUTILS=y
 BR2_PACKAGE_DROPBEAR=y
@@ -92,11 +181,24 @@ BR2_PACKAGE_STRACE=y
 #
 # It selects libmpdclient, which Phase 3's panel daemon needs anyway.
 BR2_PACKAGE_MPD_MPC=y
+# Sticker database: ratings, play counts and "loved" flags, which myMPD
+# uses heavily. Needs sqlite, and needs somewhere persistent to put the
+# file, which is why it arrives with the data partition and not before.
+BR2_PACKAGE_MPD_SQLITE=y
 # No BR2_PACKAGE_USBUTILS: it depends on BR2_PACKAGE_HAS_UDEV because
 # lsusb wants udev's hwdb, and this image uses mdev. BusyBox's own lsusb
 # applet is enabled by default and lists bus/device IDs, which is all
 # Phase 1 needs. Revisit only if a device name database becomes worth
 # dragging eudev in for.
+
+# --- Storage -----------------------------------------------------------
+# e2fsprogs for mke2fs and e2fsck, used by /etc/init.d/S03data to create
+# the data partition's filesystem on first boot and to preen it after a
+# power cut. BusyBox has mke2fs but it only makes ext2, and a journal is
+# the entire point on a device whose normal shutdown is the mains
+# switch. resize2fs is deliberately absent: the partition is grown
+# before the filesystem is created, so there is never one to resize.
+BR2_PACKAGE_E2FSPROGS=y
 
 # --- Host tools --------------------------------------------------------
 BR2_PACKAGE_HOST_GENIMAGE=y

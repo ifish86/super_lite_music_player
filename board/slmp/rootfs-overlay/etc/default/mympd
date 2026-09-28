@@ -1,0 +1,105 @@
+# Configuration for myMPD, read by /etc/init.d/S96mympd.
+#
+# myMPD does not have a config file. It keeps one small file per setting
+# under <workdir>/config, and on every start it reads the environment
+# first: if MYMPD_<SETTING> is set, the matching file is deleted and
+# rewritten from the environment. So anything exported here wins over
+# whatever is in the work directory, on every boot.
+#
+# The work directory is on /data, so settings changed in the web UI do
+# survive a reboot - but anything exported here is reapplied on every
+# start and overwrites them. Export a setting to pin it; leave it out to
+# let the web UI own it.
+#
+# The full list of settings is in myMPD's
+# docs/020-configuration/configuration-files.rst.
+#
+# Hence the two kinds of variable below. The exported ones are myMPD's
+# own and are named MYMPD_<setting>; the unexported ones are read by the
+# init script and mean nothing to the binary. myMPD has no config item
+# called workdir, cachedir, syslog or args, so the two namespaces do not
+# collide.
+
+# Settings, the album cache and state files go on the data partition.
+# The disk caches do not: they are regenerable, they are the only thing
+# here that grows without a bound, and writing cover art to a CF card
+# continuously is how the card dies.
+#
+# Both of these are myMPD's own compiled-in defaults, deliberately.
+# /var/lib/mympd is a symlink to /data/mympd, and /var/cache is a
+# skeleton symlink to /tmp, so the paths below and the paths a bare
+# "mympd" with no arguments would use are the same places. Before that
+# symlink existed, running "mympd" by hand on the unit produced forty
+# lines of "Read-only file system" pointing at /var/lib/mympd - nowhere
+# near where the service had been told to write, and a fine way to send
+# whoever is debugging in the wrong direction.
+MYMPD_WORKDIR="/var/lib/mympd"
+MYMPD_CACHEDIR="/var/cache/mympd"
+
+# Plain HTTP on port 80. This is a LAN appliance and the image already
+# runs telnetd, so TLS here would be a fig leaf; it is off for a more
+# concrete reason as well. myMPD generates a self-signed certificate
+# into its work directory on first start, that work directory is a
+# tmpfs, and RSA keygen on a 500 MHz Geode is not something to do on
+# every boot for a certificate the browser will reject anyway.
+export MYMPD_HTTP=true
+export MYMPD_HTTP_PORT=80
+export MYMPD_SSL=false
+
+# Disk caches off. 0 disables a cache, -1 would keep it forever. The
+# cache directory is a tmpfs, so these live in the 256 MB of RAM the
+# unit has. Turning them off costs re-reading artwork from the files
+# each time it is displayed.
+export MYMPD_CACHE_COVER_KEEP_DAYS=0
+export MYMPD_CACHE_THUMBS_KEEP_DAYS=0
+export MYMPD_CACHE_LYRICS_KEEP_DAYS=0
+export MYMPD_CACHE_HTTP_KEEP_DAYS=0
+
+# Log to syslog rather than to a file of our own. syslogd is already
+# running by the time this starts and writes to /var/log, which is a
+# symlink to /tmp.
+MYMPD_SYSLOG=1
+
+# No outbound HTTPS. This image ships no CA certificate bundle, because
+# the proposal argues against trusting the public CA system with a frozen
+# bundle that expires years after anyone is thinking about it. Anything
+# reaching out over TLS therefore cannot verify a peer and should not be
+# trying. WebradioDB is the one feature that phones home by itself; the
+# script-driven ones - lyrics fetching, ListenBrainz, fanart - cannot run
+# at all, because Lua is compiled out.
+#
+# cert_check=false is what allows myMPD to start at all on this image,
+# and it is not the security decision it looks like.
+#
+# mympd_read_ca_certificates() in src/lib/config/cacertstore.c returns
+# false when cert_check is on and there is no CA store, and main.c treats
+# that as a fatal startup error. On a BDP-1 myMPD got all the way to
+# "Listening on http://0.0.0.0:80" and then exited with:
+#
+#   EMERG mympd: System certificate store not found.
+#   NOTICE mympd: Exiting erroneous, thank you for using myMPD
+#
+# The check short-circuits on cert_check == false, before it looks for a
+# store. What is being switched off is certificate verification for
+# *outbound* connections, and this image makes no outbound TLS
+# connections: webradiodb is off below, and the script-driven features
+# that would fetch lyrics, ListenBrainz data or fanart cannot run because
+# Lua is compiled out. So this disables verification of connections that
+# do not happen. If outbound HTTPS is ever wanted, the answer is to point
+# ca_cert_store at a pinned certificate, not to ship a public CA bundle -
+# which is the proposal's position and Phase 4's job.
+export MYMPD_CERT_CHECK=false
+
+# There is a second, separate "EMERG CA cert store not found." logged
+# once per start, from the code that computes the *default* value of
+# ca_cert_store. That one is harmless and cannot be silenced: the lookup
+# runs before the environment is read, unconditionally.
+export MYMPD_WEBRADIODB=false
+
+# Uncomment to restrict the web UI to a subnet. Empty means no
+# restriction. The format is myMPD's own, not CIDR-only:
+#export MYMPD_ACL="+192.168.0.0/16"
+
+# Extra arguments, if any are ever needed. Work and cache directories
+# are passed by the init script from the two variables above.
+MYMPD_ARGS=""

@@ -1,0 +1,99 @@
+#!/bin/sh
+#
+# slmp-mount-share - mount one network share read-only under /media.
+#
+#     slmp-mount-share <type> <source> <name> [extra options]
+#     slmp-mount-share cifs //192.168.0.196/Tiny/MEDIA/MUSIC_DROP subsonic
+#
+# Credentials are never arguments. They are read from
+# /data/shares/<name>.cred, because the kernel discards the
+# "credentials=" mount option (it is a mount.cifs feature, and this image
+# has no mount.cifs) and because a password does not belong in a file
+# that ships inside the image.
+
+TYPE="$1"
+SRC="$2"
+NAME="$3"
+EXTRA="$4"
+
+MEDIA=/media
+CREDDIR=/data/shares
+# A NAS that is still waking up is normal; a NAS that is switched off must
+# not hold the boot up for long. Three tries, two seconds apart.
+RETRIES=3
+RETRY_WAIT=2
+
+log() { logger -t share "$*" 2>/dev/null || echo "share: $*"; }
+
+[ -n "$TYPE" ] && [ -n "$SRC" ] && [ -n "$NAME" ] || {
+	echo "usage: $0 <cifs|nfs4> <source> <name> [options]" >&2; exit 1; }
+
+# The name becomes a path and comes out of a config file, so hold it to
+# the same standard as a USB volume label.
+NAME=$(printf '%s' "$NAME" | tr -c 'A-Za-z0-9._-' '_' | sed 's/^[._]*//')
+[ -n "$NAME" ] || { log "unusable share name"; exit 1; }
+
+DIR="$MEDIA/$NAME"
+OPTS="ro,noatime,nosuid,nodev,noexec"
+
+case "$TYPE" in
+	cifs)
+		OPTS="$OPTS,iocharset=utf8"
+		CRED="$CREDDIR/$NAME.cred"
+		if [ -r "$CRED" ]; then
+			# Trailing whitespace is stripped from the username and the
+			# domain, because a trailing space there is always a typo and
+			# would be sent as part of the name. It is NOT stripped from
+			# the password: a password may legitimately end in a space,
+			# and silently changing someone's password is worse than
+			# making them notice their own typo.
+			_u=$(sed -n 's/^[[:space:]]*username[[:space:]]*=[[:space:]]*//p' "$CRED" | head -1 | sed 's/[[:space:]]*$//')
+			_d=$(sed -n 's/^[[:space:]]*domain[[:space:]]*=[[:space:]]*//p'   "$CRED" | head -1 | sed 's/[[:space:]]*$//')
+			_p=$(sed -n 's/^[[:space:]]*password[[:space:]]*=[[:space:]]*//p' "$CRED" | head -1)
+			case "$_p" in
+				*[[:space:]]) log "note: password for $NAME ends in whitespace, which is taken literally" ;;
+			esac
+			[ -n "$_u" ] && OPTS="$OPTS,user=$_u"
+			[ -n "$_p" ] && OPTS="$OPTS,pass=$_p"
+			[ -n "$_d" ] && OPTS="$OPTS,domain=$_d"
+			case "$_p" in
+				*,*) log "WARNING: password for $NAME contains a comma, which the mount option string cannot express" ;;
+			esac
+		else
+			log "no credentials at $CRED, trying $NAME anonymously"
+		fi
+		;;
+	nfs4)
+		# NFSv3 would need a userspace portmapper step that BusyBox's
+		# mount cannot do, so v4 only.
+		OPTS="$OPTS,nolock"
+		;;
+	*)
+		log "unknown share type '$TYPE' for $NAME"; exit 1 ;;
+esac
+
+[ -n "$EXTRA" ] && OPTS="$OPTS,$EXTRA"
+
+mkdir -p "$DIR" || { log "cannot create $DIR"; exit 1; }
+
+if mountpoint -q "$DIR"; then
+	log "$DIR already mounted"
+	exit 0
+fi
+
+i=1
+while [ "$i" -le "$RETRIES" ]; do
+	# stderr is kept: a failed CIFS mount says something useful, and it
+	# is the only clue anyone gets. The option string is not logged,
+	# because the password is in it.
+	if err=$(mount -t "$TYPE" -o "$OPTS" "$SRC" "$DIR" 2>&1); then
+		log "mounted $SRC at $DIR"
+		exit 0
+	fi
+	[ "$i" -lt "$RETRIES" ] && sleep "$RETRY_WAIT"
+	i=$((i + 1))
+done
+
+log "failed to mount $SRC at $DIR after $RETRIES tries: $err"
+rmdir "$DIR" 2>/dev/null
+exit 1

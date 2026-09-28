@@ -62,6 +62,13 @@ BOARD_DIR="$SCRIPT_DIR/board/$BOARD_NAME"
 OVERLAY_DIR="$BOARD_DIR/rootfs-overlay"
 DEFCONFIG_SRC="$SCRIPT_DIR/configs/${BOARD_NAME}_defconfig"
 
+# Packages that are ours rather than Buildroot's live in a BR2_EXTERNAL
+# tree. Unlike the board directory this is not symlinked in: Buildroot
+# takes it as a make variable and records it in the output directory, so
+# it only has to be passed when the configuration is applied. Every
+# later "make -C" reads it back from output/.br2-external.mk.
+BR2_EXTERNAL_DIR="$SCRIPT_DIR/br2-external"
+
 # Buildroot reads this from the environment in preference to the config
 # item, which is why the defconfig does not carry a download path.
 export BR2_DL_DIR="$DL_DIR"
@@ -303,12 +310,23 @@ KERNEL_CRITICAL=(
 
 log "Linking board files into Buildroot"
 
-for d in "$BOARD_DIR" "$OVERLAY_DIR"; do
+for d in "$BOARD_DIR" "$OVERLAY_DIR" "$BR2_EXTERNAL_DIR"; do
     [ -d "$d" ] || die "missing $d
 The board directory is part of the repository. If it is not there, the
 checkout is incomplete."
 done
 [ -f "$DEFCONFIG_SRC" ] || die "missing $DEFCONFIG_SRC"
+
+# The packages in the external tree build from submodules under src/.
+# An uninitialised submodule is an empty directory, and Buildroot's
+# local site method will happily rsync nothing at all and then fail much
+# later with a CMake error that does not mention submodules.
+if grep -q "^BR2_PACKAGE_MYMPD=y" "$DEFCONFIG_SRC" && \
+   [ ! -f "$SCRIPT_DIR/src/mympd/CMakeLists.txt" ]; then
+    die "src/mympd is empty but BR2_PACKAGE_MYMPD=y.
+It is a git submodule. Fetch it with:
+  git -C '$SCRIPT_DIR' submodule update --init --recursive"
+fi
 
 mkdir -p "$BR_DIR/board" "$BR_DIR/configs"
 ln -sfn "$BOARD_DIR" "$BR_DIR/board/$BOARD_NAME"
@@ -349,7 +367,7 @@ printf 'BR2_ROOTFS_POST_IMAGE_SCRIPT_ARGS="%s %s %s"\n' \
 # while the requested boot flavour had silently become isolinux.
 
 log "Applying defconfig"
-make -C "$BR_DIR" "${BOARD_NAME}_defconfig"
+make -C "$BR_DIR" BR2_EXTERNAL="$BR2_EXTERNAL_DIR" "${BOARD_NAME}_defconfig"
 
 check_config() {
     # $1 = label, $2 = .config to inspect, $3.. = requested "SYM=value"
@@ -456,21 +474,92 @@ else
 fi
 
 # Cheap sanity check on the whole point of the exercise. -march=geode
-# must not emit NOPL, and nothing in the image may use SSE.
+# must not emit anything from the long-NOP opcode range.
+#
+# NOPL is 0F 1F, the one instruction an i686 build has that the Geode LX
+# does not. ENDBR32 is F3 0F 1E FB, the adjacent opcode in the same
+# reserved-NOP group, emitted by -fcf-protection=full. A CPU that raises
+# #UD on 0F 1F cannot be assumed to decode 0F 1E, and a package that
+# feature-tests its own hardening flags will turn that on without asking
+# - myMPD does exactly this, which is why its CMAKE_BUILD_TYPE is None.
+#
+# Every ELF in the image is swept, rather than a hand-kept list of the
+# interesting ones. ffmpeg and OpenSSL are why: both ship hand-written
+# x86 assembly whose alignment padding is chosen by the assembler, which
+# does not know about -march=geode, and no hand-kept list was ever going
+# to include a shared library nobody thought about.
+#
+# What counts as a hit is the instruction ENCODING, not objdump's
+# mnemonic. objdump renders the whole 0F 18..0F 1F hint-nop range as
+# "nopl", so matching the mnemonic finds constant tables that happen to
+# live in .text and get disassembled as code - five such false positives
+# in libcrypto alone - while MISSING the register form 0F 1F D0, which
+# objdump calls plain "nop". Matching the opcode bytes finds exactly
+# NOPL (0F 1F) and ENDBR32 (F3 0F 1E FB) and nothing else.
+#
+# A hit inside a function that also contains SSE or AES-NI is reported
+# but not fatal. OpenSSL and ffmpeg pick those routines from CPUID at
+# runtime; a CPU with no SSE never enters them, which is the same reason
+# their SSE is not a problem either. A hit in a function with no SIMD in
+# it is ordinary compiled code that will certainly execute, and that is
+# what fails the build.
+#
+# Deliberately NOT scanned for: SSE itself, for the reason above.
+GEODE_MUST_EXIST="bin/busybox usr/bin/mpd usr/bin/mympd usr/bin/bdp-panel usr/bin/upmpdcli"
+
 OBJDUMP="$(find_first "$BR_DIR"/output/host/bin/i*-linux-objdump || true)"
 if [ -n "$OBJDUMP" ]; then
-    log "Checking target binaries for NOPL"
-    for b in bin/busybox usr/bin/mpd; do
-        [ -f "$BR_DIR/output/target/$b" ] || { warn "$b not found"; continue; }
-        dis="$("$OBJDUMP" -d "$BR_DIR/output/target/$b" 2>/dev/null)"
-        n="$(printf '%s\n' "$dis" | grep -c '\<nopl\>' || true)"
-        tot="$(printf '%s\n' "$dis" | grep -cE '^[[:space:]]+[0-9a-f]+:' || true)"
-        if [ "$n" -eq 0 ]; then
-            printf '  %-16s %s instructions, no nopl\n' "$b" "$tot"
-        else
-            warn "$b contains $n nopl instruction(s) out of $tot"
-        fi
+    log "Checking every ELF in the image for instructions the Geode LX lacks"
+
+    for b in $GEODE_MUST_EXIST; do
+        [ -f "$BR_DIR/output/target/$b" ] || warn "expected $b in the image, not found"
     done
+
+    GEODE_FILES=0
+    GEODE_DIRTY=0
+    GEODE_DISPATCHED=0
+    while IFS= read -r b; do
+        case "$(LC_ALL=C file -b "$b" 2>/dev/null)" in
+            ELF*) ;;
+            *) continue ;;
+        esac
+        GEODE_FILES=$((GEODE_FILES + 1))
+
+        # Emits: "<reachable hits> <simd-dispatched hits> <first bad function>"
+        read -r reach disp badfn <<EOF
+$("$OBJDUMP" -d "$b" 2>/dev/null | awk -F'\t' '
+    function tally() {
+        if (bad > 0) {
+            if (simd) { disp += bad } else { reach += bad; if (badfn == "") badfn = fn }
+        }
+        bad = 0; simd = 0
+    }
+    /^[0-9a-f]+ <.*>:/ {
+        tally(); fn = $0; sub(/^[0-9a-f]+ </, "", fn); sub(/>:.*/, "", fn); next
+    }
+    { if ($3 ~ /%[xy]mm|aes[a-z]/) simd = 1
+      if ($2 ~ /^(66 )*0f 1f / || $2 ~ /^f3 0f 1e fb/) bad++ }
+    END { tally(); printf "%d %d %s\n", reach + 0, disp + 0, badfn }')
+EOF
+        rel="${b#"$BR_DIR/output/target/"}"
+        if [ "${reach:-0}" -gt 0 ]; then
+            warn "$rel: $reach unsupported instruction(s) in non-SIMD code, first in $badfn"
+            GEODE_DIRTY=$((GEODE_DIRTY + 1))
+        fi
+        if [ "${disp:-0}" -gt 0 ]; then
+            printf '  %-28s %s in CPUID-dispatched SIMD routines, unreachable here\n' \
+                "$rel" "$disp"
+            GEODE_DISPATCHED=$((GEODE_DISPATCHED + 1))
+        fi
+    done <<EOF
+$(find "$BR_DIR/output/target" -type f -perm -u+x 2>/dev/null)
+EOF
+
+    printf '  %d ELF files scanned, %d with SIMD-only hits, %d unsafe\n' \
+        "$GEODE_FILES" "$GEODE_DISPATCHED" "$GEODE_DIRTY"
+    [ "$GEODE_DIRTY" -eq 0 ] || die "$GEODE_DIRTY file(s) contain NOPL or ENDBR32 in code with no
+SIMD around it, which means it is not behind a CPUID check and will run.
+The image will fault at runtime, not fail to build."
 fi
 
 # ---------------------------------------------------------------------

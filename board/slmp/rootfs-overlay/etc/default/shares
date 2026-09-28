@@ -1,0 +1,56 @@
+# Network shares to mount under /media at boot, read by
+# /etc/init.d/S45shares. One share per line:
+#
+#     <type> <source> <name> [extra mount options]
+#
+#   type    cifs or nfs4
+#   source  cifs: //<ip>/<share>[/<subdirectory>]
+#           nfs4: <ip>:/<export>
+#   name    the directory under /media to mount it at
+#
+# /media is MPD's music_directory, so a share mounted here shows up as a
+# top-level folder in myMPD with no further configuration.
+#
+# Everything is mounted read-only. This is a music player.
+#
+# Use an IP address, not a hostname. The kernel has no resolver of its
+# own, and the upcall CONFIG_DNS_RESOLVER provides needs a userspace
+# helper this image does not ship.
+#
+# --- Credentials -------------------------------------------------------
+#
+# Do NOT put a username or password on the lines below, and do not put
+# them in this file: it lives in the image, which lives in git.
+#
+# Put them on the data partition instead, in /data/shares/<name>.cred,
+# which survives a reflash:
+#
+#     username=someone
+#     password=something
+#     domain=optional
+#
+# chmod 600 it. /data/shares is created by S03data with mode 0700.
+#
+# Note that "credentials=" as a mount option does not work here. The
+# kernel maps it, and "cred=", to Opt_ignore - they are meant to be
+# consumed by the mount.cifs helper, which this image does not ship - so
+# it would be silently discarded and the mount would fail as anonymous.
+# S45shares reads the file itself and builds user=/pass= from it.
+#
+# A password containing a comma cannot be passed this way either, because
+# the mount option string has no escaping. Change the password.
+#
+# With no credentials file the share is tried anonymously, which is what
+# a guest-readable share wants.
+#
+# --- Dialect -----------------------------------------------------------
+#
+# The kernel negotiates SMB3.1.1 down to 2.1 by default, which is what
+# any NAS made this decade speaks. A server that only does SMB1 needs
+# "vers=1.0" as an extra option on its line; the kernel will accept that,
+# because CONFIG_CIFS_ALLOW_INSECURE_LEGACY is "default y" upstream and
+# so is compiled in whether we ask for it or not.
+
+# Site-specific. Change the address and path to your own NAS, or comment
+# it out if you have none.
+cifs //192.168.0.196/Tiny/MEDIA/MUSIC_DROP/Subsonic subsonic

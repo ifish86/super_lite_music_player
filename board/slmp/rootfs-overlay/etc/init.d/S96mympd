@@ -1,0 +1,56 @@
+#!/bin/sh
+#
+# S96mympd - myMPD web UI.
+#
+# S96, so after S95mpd. myMPD does not need MPD to be up - it reconnects
+# on its own - but starting second means the first thing the UI shows is
+# a connected player rather than an error.
+
+DAEMON=/usr/bin/mympd
+PIDFILE=/var/run/mympd.pid
+
+MYMPD_WORKDIR="/var/lib/mympd"
+MYMPD_CACHEDIR="/var/cache/mympd"
+MYMPD_SYSLOG=1
+MYMPD_ARGS=""
+
+# allexport, because most of what that file sets is myMPD's own
+# MYMPD_<setting> configuration and has to reach the daemon's
+# environment, not just this shell. The four variables above are not
+# myMPD settings; exporting them too is harmless, as myMPD only looks up
+# the names of its own config items.
+set -a
+# shellcheck source=/dev/null
+[ -r /etc/default/mympd ] && . /etc/default/mympd
+set +a
+
+start() {
+	printf 'Starting myMPD: '
+
+	# S03data makes the work directory; the cache directory is on a
+	# tmpfs and is gone at every boot. myMPD creates its own
+	# subdirectories under both, but not these two roots.
+	if ! mkdir -p "$MYMPD_WORKDIR" "$MYMPD_CACHEDIR"; then
+		echo "FAIL (cannot create $MYMPD_WORKDIR - did S03data run?)"
+		return 1
+	fi
+
+	[ "$MYMPD_SYSLOG" = "1" ] && set -- -s
+	start-stop-daemon -S -q -b -m -p "$PIDFILE" -x "$DAEMON" -- \
+		-w "$MYMPD_WORKDIR" -a "$MYMPD_CACHEDIR" "$@" $MYMPD_ARGS
+	if [ $? = 0 ]; then echo OK; else echo FAIL; fi
+}
+
+stop() {
+	printf 'Stopping myMPD: '
+	start-stop-daemon -K -q -p "$PIDFILE"
+	if [ $? = 0 ]; then echo OK; else echo FAIL; fi
+	rm -f "$PIDFILE"
+}
+
+case "$1" in
+	start)   start ;;
+	stop)    stop ;;
+	restart|reload) stop; sleep 1; start ;;
+	*)       echo "Usage: $0 {start|stop|restart}"; exit 1 ;;
+esac

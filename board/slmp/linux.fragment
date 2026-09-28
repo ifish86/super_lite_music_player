@@ -23,7 +23,43 @@ CONFIG_EXT4_FS=y
 CONFIG_VFAT_FS=y
 CONFIG_NLS_CODEPAGE_437=y
 CONFIG_NLS_ISO8859_1=y
+CONFIG_NLS_UTF8=y
 CONFIG_TMPFS=y
+
+# --- Removable storage -------------------------------------------------
+# Whatever someone plugs in. FAT and ext4 are already above; these two
+# are what the rest of the world actually ships on a USB drive. Both are
+# in-tree in 6.6 - exfat since 5.7, ntfs3 since 5.15 - so neither costs
+# an out-of-tree module.
+#
+# ntfs3 is read-write upstream but /usr/sbin/slmp-usb-mount mounts
+# everything read-only anyway, which sidesteps the question of how much
+# to trust it with someone's only copy of their music.
+CONFIG_EXFAT_FS=y
+CONFIG_NTFS3_FS=y
+
+# --- Network shares ----------------------------------------------------
+# SMB/CIFS, because the music lives on a NAS and MPD's own smbclient
+# storage plugin is not available here: it needs libsmbclient, which in
+# Buildroot means samba4, which "depends on !BR2_TOOLCHAIN_USES_MUSL".
+# Switching the whole image to glibc to get an smb:// URI in myMPD's
+# mount dialog is not a trade worth making, so the share is mounted by
+# the kernel and MPD sees an ordinary directory under /media.
+#
+# CIFS selects everything it needs - NLS_UCS2_UTILS, KEYS, ASN1,
+# NETFS_SUPPORT and six crypto algorithms - so this one symbol is
+# enough. Verify it anyway: that is a lot of implied dependencies.
+#
+# CONFIG_CIFS_ALLOW_INSECURE_LEGACY is not listed here and is on anyway:
+# it is "default y" in fs/smb/client/Kconfig, so selecting CIFS brings it
+# in. That is harmless - it only permits SMB1 and SMB2.0 to be asked for
+# explicitly with vers=1.0, and nothing does. Worth knowing rather than
+# rediscovering, since the mount options are where the dialect is
+# actually chosen.
+CONFIG_CIFS=y
+# NFS is already on from i386_defconfig. Note that NFSv3 needs a
+# userspace portmapper negotiation that BusyBox's mount cannot do
+# (CONFIG_FEATURE_MOUNT_NFS is off), so only NFSv4 is usable here.
 
 # --- Audio -------------------------------------------------------------
 CONFIG_SOUND=y
@@ -81,15 +117,15 @@ CONFIG_HW_RANDOM_GEODE=y
 CONFIG_NET=y
 CONFIG_INET=y
 CONFIG_PACKET=y
-# Shotgun approach until lspci on a real unit says which one it is.
-# Trim to the one that matters; every driver here is dead weight.
+# lspci on a real BDP-1 says:
+#   00:0d.0 Ethernet controller: VIA Technologies, Inc. VT6105M [Rhine-III]
+# so the shotgun is gone and this is the one driver that matters. The
+# Realtek and NatSemi drivers that used to be here were carried on the
+# off chance and never bound to anything.
 CONFIG_NET_VENDOR_VIA=y
 CONFIG_VIA_RHINE=y
-CONFIG_NET_VENDOR_REALTEK=y
-CONFIG_8139TOO=y
-CONFIG_R8169=y
-CONFIG_NET_VENDOR_NATSEMI=y
-CONFIG_NATSEMI=y
+# CONFIG_NET_VENDOR_REALTEK is not set
+# CONFIG_NET_VENDOR_NATSEMI is not set
 
 # --- Trim --------------------------------------------------------------
 # No DRM and no fbdev. The VGA text console has no prompt on x86 and

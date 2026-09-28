@@ -1,0 +1,30 @@
+#!/bin/sh
+#
+# S11usb - mount USB drives that were already plugged in at power-on.
+#
+# S11, so immediately after S10mdev has started the hotplug daemon and
+# well before S95mpd scans /media. Drives plugged in later are handled by
+# mdev calling the same script; this only covers the ones that were
+# already there, which mdev never hears a uevent for.
+
+case "$1" in
+	start)
+		printf 'Scanning for USB drives: '
+		/usr/sbin/slmp-usb-mount scan
+		echo OK
+		;;
+	stop)
+		# Unmount anything still mounted, so the shutdown does not
+		# leave a drive dirty. Read-only mounts make this mostly a
+		# formality.
+		awk '$2 ~ "^/media/" { print $2 }' /proc/mounts |
+			while read -r dir; do
+				umount -l "$dir" 2>/dev/null
+			done
+		;;
+	restart|reload)
+		;;
+	*)
+		echo "Usage: $0 {start|stop}"; exit 1
+		;;
+esac

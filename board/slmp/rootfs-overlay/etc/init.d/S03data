@@ -1,0 +1,188 @@
+#!/bin/sh
+#
+# S03data - the persistent data partition.
+#
+# Everything downstream of this script - ALSA mixer state, dropbear host
+# keys, the MPD database, myMPD's settings - just uses /data and does not
+# care how it got there. That is the point: this is the only script that
+# knows whether the storage is real.
+#
+# On the first boot of a freshly flashed card the partition exists in the
+# table at 8 MB with no filesystem in it. This script grows the table
+# entry to fill the card, reboots so the kernel re-reads it, and makes an
+# ext4 on the second pass. After that it is an ordinary fsck-and-mount.
+#
+# If any of that fails, /data becomes a tmpfs and the unit still plays
+# music. Losing settings is a bad day; refusing to boot is a dead
+# product.
+
+DISK=/dev/sda
+DISK_NAME=sda
+PART_NR=3
+PART_DEV=/dev/sda3
+PART_NAME=sda3
+DATA_DIR=/data
+
+# Space to leave unallocated at the end of the card, for the Phase 4 B
+# rootfs slot. It has to match the rootfs partition size in
+# genimage.cfg; if that grows and this does not, a future A/B update has
+# nowhere to land and the only fix is a reflash.
+RESERVE_MB=400
+
+# Do not bother growing for less than this. Keeps a card that is already
+# the right size from being rewritten on every boot for a few sectors.
+GROW_THRESHOLD_MB=32
+
+# MBR partition entry N lives at 0x1BE + 16*(N-1). The 4-byte LBA sector
+# count is at offset 12 within the entry, little-endian.
+#   entry 3: 0x1BE + 32 = 0x1DE = 478
+#   its size field:      478 + 12 = 490
+MBR_ENTRY3_OFF=478
+MBR_ENTRY3_SIZE_OFF=490
+
+log() { echo "data: $*"; logger -t data "$*" 2>/dev/null || true; }
+
+sectors_per_mb=2048   # 512-byte sectors
+
+# Write a little-endian 32-bit value into the MBR at a byte offset.
+# Done with dd rather than with fdisk because it is the same four bytes
+# every time: no interactive prompts to get wrong, and no dependency on
+# which fdisk applet happens to be compiled in.
+write_le32() {
+	_off="$1"
+	_val="$2"
+	_b0=$(( _val         & 255 ))
+	_b1=$(( (_val >> 8)  & 255 ))
+	_b2=$(( (_val >> 16) & 255 ))
+	_b3=$(( (_val >> 24) & 255 ))
+	printf "\\$(printf '%03o' $_b0)\\$(printf '%03o' $_b1)\\$(printf '%03o' $_b2)\\$(printf '%03o' $_b3)" |
+		dd of="$DISK" bs=1 seek="$_off" conv=notrunc 2>/dev/null
+}
+
+grow_if_needed() {
+	[ -r "/sys/block/$DISK_NAME/size" ] || return 1
+	[ -r "/sys/block/$DISK_NAME/$PART_NAME/size" ] || return 1
+
+	disk_sectors=$(cat "/sys/block/$DISK_NAME/size")
+	part_start=$(cat "/sys/block/$DISK_NAME/$PART_NAME/start")
+	part_sectors=$(cat "/sys/block/$DISK_NAME/$PART_NAME/size")
+
+	reserve_sectors=$(( RESERVE_MB * sectors_per_mb ))
+	want_sectors=$(( disk_sectors - reserve_sectors - part_start ))
+	gain=$(( want_sectors - part_sectors ))
+
+	if [ "$gain" -lt $(( GROW_THRESHOLD_MB * sectors_per_mb )) ]; then
+		return 1
+	fi
+
+	log "growing partition $PART_NR from $((part_sectors / sectors_per_mb))M to $((want_sectors / sectors_per_mb))M"
+	log "leaving ${RESERVE_MB}M free at the end of the card for a future B slot"
+
+	if ! write_le32 "$MBR_ENTRY3_SIZE_OFF" "$want_sectors"; then
+		log "could not write the partition table, carrying on at the old size"
+		return 1
+	fi
+
+	# The CHS end fields are meaningless past 8 GB and Linux ignores
+	# them for an LBA partition, but leaving them describing the old
+	# 8 MB confuses anything that does read them. 0xFE 0xFF 0xFF is the
+	# conventional "past the end of what CHS can say".
+	printf '\376\377\377' |
+		dd of="$DISK" bs=1 seek=$(( MBR_ENTRY3_OFF + 5 )) conv=notrunc 2>/dev/null
+
+	sync
+	return 0
+}
+
+start() {
+	mkdir -p "$DATA_DIR"
+
+	# The kernel will not re-read the partition table while the root
+	# filesystem is mounted off the same disk, so growing it means
+	# rebooting to see the result. This happens exactly once, on the
+	# first boot after flashing.
+	if grow_if_needed; then
+		log "rebooting so the kernel picks up the new partition table"
+		sync
+		reboot -f
+		# reboot -f does not return
+		sleep 30
+	fi
+
+	if [ ! -b "$PART_DEV" ]; then
+		log "$PART_DEV does not exist; falling back to tmpfs"
+		fallback
+		return
+	fi
+
+	# blkid prints nothing for a partition with no recognisable
+	# filesystem, which is exactly the state a freshly flashed card is
+	# in. Anything else and there is a filesystem here already, so do
+	# not touch it.
+	if [ -z "$(blkid "$PART_DEV" 2>/dev/null)" ]; then
+		log "no filesystem on $PART_DEV, creating one"
+		if ! mke2fs -t ext4 -q -L SLMPDATA -m 0 "$PART_DEV" >/dev/null 2>&1; then
+			log "mke2fs failed; falling back to tmpfs"
+			fallback
+			return
+		fi
+	else
+		# This unit gets its power pulled rather than shut down. The
+		# journal handles most of it; a preen pass handles the rest and
+		# costs nothing when there is nothing wrong.
+		e2fsck -p "$PART_DEV" >/dev/null 2>&1
+	fi
+
+	printf 'Mounting %s: ' "$DATA_DIR"
+	if mount -t ext4 -o rw,noatime "$PART_DEV" "$DATA_DIR"; then
+		echo OK
+	else
+		echo FAIL
+		log "mount of $PART_DEV failed; falling back to tmpfs"
+		fallback
+		return
+	fi
+
+	make_dirs
+}
+
+# /data always exists. When the real thing is unusable it is a tmpfs, so
+# every later script works unchanged and the only thing lost is
+# persistence.
+#
+# Unless even that fails, which is worth saying out loud rather than
+# assuming. The first version of this logged "falling back to tmpfs" and
+# then "/data is a tmpfs" unconditionally, and on a unit where the
+# mountpoint did not exist it printed both while /data was not mounted at
+# all. The log has to report what happened, not what was attempted.
+fallback() {
+	if mount -t tmpfs -o size=16m,mode=0755 tmpfs "$DATA_DIR" 2>/dev/null; then
+		make_dirs
+		log "WARNING: /data is a tmpfs. Settings will not survive a reboot."
+	else
+		log "ERROR: nothing could be mounted on $DATA_DIR."
+		log "ERROR: does the directory exist in the image? MPD and myMPD will not start."
+	fi
+}
+
+make_dirs() {
+	mkdir -p "$DATA_DIR/mympd" "$DATA_DIR/mpd/playlists" "$DATA_DIR/alsa"
+	# dropbear refuses to use a host key directory others can read.
+	mkdir -p "$DATA_DIR/dropbear"
+	chmod 0700 "$DATA_DIR/dropbear"
+	# Network share credentials. Here rather than in /etc so that a
+	# password is not part of the image, and so it survives a reflash.
+	mkdir -p "$DATA_DIR/shares"
+	chmod 0700 "$DATA_DIR/shares"
+}
+
+stop() {
+	umount "$DATA_DIR" 2>/dev/null
+}
+
+case "$1" in
+	start)   start ;;
+	stop)    stop ;;
+	restart|reload) ;;
+	*)       echo "Usage: $0 {start|stop}"; exit 1 ;;
+esac

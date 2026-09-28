@@ -1,0 +1,5 @@
+menu "super_lite_music_player"
+
+source "$BR2_EXTERNAL_SLMP_PATH/package/mympd/Config.in"
+
+endmenu

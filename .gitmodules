@@ -1,0 +1,3 @@
+[submodule "src/mympd"]
+	path = src/mympd
+	url = git@github.com:ifish86/jcorporation_myMPD.git

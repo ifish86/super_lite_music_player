@@ -1,3 +1,11 @@
 output
 geode-build
 assets
+
+# Compiled panel daemon. src/panel is where you build by hand as well as
+# where the firmware build runs, so whether this file is an x86-64 host
+# binary or an i586 target one depends on who ran make last. That is the
+# same confusion post-build.sh cleans either side of the cross build; it
+# should never be committed on top of it.
+/src/panel/bdp-panel
+*.o

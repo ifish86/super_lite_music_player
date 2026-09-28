@@ -7,5 +7,15 @@ devpts           /dev/pts    devpts  defaults,gid=5,mode=620,ptmxmode=0666    0 
 tmpfs            /dev/shm    tmpfs   mode=1777,nosuid,nodev                  0      0
 tmpfs            /tmp        tmpfs   mode=1777,nosuid,nodev,size=16m         0      0
 tmpfs            /run        tmpfs   mode=0755,nosuid,nodev,size=4m          0      0
+# Mountpoints for USB drives, created by /usr/sbin/slmp-usb-mount as
+# drives appear. Only ever holds empty directories - the drives
+# themselves mount inside it - so it needs no real space.
+tmpfs            /media      tmpfs   mode=0755,nosuid,nodev,size=1m          0      0
+# Persistent storage: settings, host keys, the MPD database. noauto
+# because /etc/init.d/S03data owns it - on a freshly flashed card the
+# partition has no filesystem yet, and if it turns out to be unusable
+# the script puts a tmpfs here instead so the unit still boots. This
+# line is here so that "mount /data" works by hand after an unmount.
+/dev/sda3        /data       ext4    rw,noatime,noauto                       0      2
 # /var/log and /var/run are skeleton symlinks to /tmp and /run. Do not
 # give them mounts of their own.

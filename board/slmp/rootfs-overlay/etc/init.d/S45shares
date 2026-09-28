@@ -1,0 +1,51 @@
+#!/bin/sh
+#
+# S45shares - mount network shares listed in /etc/default/shares.
+#
+# S45, so after S40network brings eth0 up and well before S95mpd scans
+# /media. A share that cannot be reached is logged and skipped: a NAS
+# that is switched off must not stop the unit from booting and playing
+# from a USB drive.
+
+# Two locations, and the writable one wins. /etc/default/shares is the
+# default that ships in the read-only image; /data/shares/shares.conf is
+# where a share added on a running unit goes, and it survives both a
+# reboot and a reflash.
+#
+# Without this, changing which NAS the unit points at means a rebuild and
+# a reflash, which is absurd for one line of configuration, and it forces
+# somebody's private LAN address into a tracked file to get a working
+# default. Until the Phase 3 settings UI exists, this file is the
+# interface.
+CONF=/etc/default/shares
+[ -r /data/shares/shares.conf ] && CONF=/data/shares/shares.conf
+HELPER=/usr/sbin/slmp-mount-share
+
+case "$1" in
+	start)
+		[ -r "$CONF" ] || exit 0
+		printf 'Mounting network shares (%s): ' "$CONF"
+		n=0
+		# No pipe into the loop: that runs it in a subshell and the
+		# count comes back zero.
+		while read -r type src name extra; do
+			case "$type" in ""|\#*) continue ;; esac
+			"$HELPER" "$type" "$src" "$name" "$extra" && n=$((n + 1))
+		done < "$CONF"
+		echo "$n mounted"
+		;;
+	stop)
+		# Lazy, because MPD may still have a file open on a share and
+		# the network may already be going away.
+		awk '$3 == "cifs" || $3 == "nfs4" || $3 == "nfs" { print $2 }' /proc/mounts |
+			while read -r dir; do
+				umount -l "$dir" 2>/dev/null
+			done
+		;;
+	restart|reload)
+		$0 stop; sleep 1; $0 start
+		;;
+	*)
+		echo "Usage: $0 {start|stop|restart}"; exit 1
+		;;
+esac

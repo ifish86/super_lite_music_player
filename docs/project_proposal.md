@@ -127,9 +127,15 @@ One C++ binary, one process, shared state. It owns:
 
 ### 4.5 Network shares
 
-Handled by MPD's storage plugins in userspace, not by kernel mounts. This removes any need for util-linux, nfs-utils or cifs-utils, none of which BusyBox provides.
+**Revised after Phase 2. The original plan was not possible.** It read: handled by MPD's storage plugins in userspace, not by kernel mounts, on the grounds that this removes any need for util-linux, nfs-utils or cifs-utils, none of which BusyBox provides.
 
-libnfs is small and the better technical fit. libsmbclient is heavy on 256 MB but realistically most users' music sits on SMB, so both will likely ship. RSS should be measured both ways before finalising.
+MPD's SMB storage plugin cannot be built here. `BR2_PACKAGE_MPD_LIBSMBCLIENT` depends on `BR2_TOOLCHAIN_USES_GLIBC`, and the `BR2_PACKAGE_SAMBA4` it selects depends on `!BR2_TOOLCHAIN_USES_MUSL`. This image is musl, chosen for size in §4.2, so the plugin route would mean rebuilding every binary in the image against glibc and adding samba4, python and gnutls — to gain a mount dialog.
+
+Shares are therefore mounted by the kernel (`CONFIG_CIFS`) under `/media`, which is MPD's `music_directory`, and MPD treats them as ordinary directories. The stated benefit of the plugin route turned out to be largely illusory: this needs no userspace packages either. BusyBox's `mount` has `FEATURE_MOUNT_CIFS` compiled in already and the kernel does the work, so util-linux, nfs-utils and cifs-utils are still all absent.
+
+What is genuinely lost is myMPD's *Mounts* page, which drives MPD's `mount` command and so has nothing to talk to. Configuring a share is a file — `/etc/default/shares`, overridden by `/data/shares/shares.conf` on the persistent partition — until the settings UI in §4.4 exists, where it belongs alongside network configuration.
+
+libnfs remains the better technical fit for NFS and has no glibc dependency, so the plugin route stays open for NFS specifically if it is ever wanted. The kernel already carries `nfs` and `nfs4` at no cost; NFSv3 is not usable because BusyBox's mount cannot do the portmapper step it needs.
 
 ### 4.6 Network configuration
 

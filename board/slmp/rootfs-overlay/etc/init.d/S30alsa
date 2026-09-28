@@ -1,16 +1,37 @@
 #!/bin/sh
-# Restore the ALSA mixer state baked into the image.
+# Restore and save the ALSA mixer state.
+#
+# The state lives on /data so that a mixer change made on the unit
+# survives a reboot. /etc/asound.state, if present, is the factory
+# default and is used only until something has been saved once.
+
+STATE=/data/alsa/asound.state
+DEFAULT=/etc/asound.state
+
 case "$1" in
     start)
-        [ -f /etc/asound.state ] || exit 0
+        [ -f "$STATE" ] || STATE="$DEFAULT"
+        [ -f "$STATE" ] || exit 0
         printf 'Restoring ALSA mixer state: '
-        if /usr/sbin/alsactl -f /etc/asound.state restore; then
+        if /usr/sbin/alsactl -f "$STATE" restore; then
             echo OK
         else
             echo FAIL
         fi
         ;;
-    stop|restart|reload)
+    stop)
+        # Only worth saving if /data is real; on the tmpfs fallback this
+        # writes into memory that is about to go away, which is harmless
+        # but pointless.
+        [ -d /data/alsa ] || exit 0
+        printf 'Saving ALSA mixer state: '
+        if /usr/sbin/alsactl -f "$STATE" store; then
+            echo OK
+        else
+            echo FAIL
+        fi
+        ;;
+    restart|reload)
         ;;
     *)
         echo "Usage: $0 {start|stop|restart}"; exit 1

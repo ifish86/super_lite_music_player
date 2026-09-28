@@ -19,9 +19,13 @@
  * Port is 9600 8N1, no flow control, and RAW. See panel_open() for why
  * the flow control part is not optional.
  *
- * Phase 3 folds this into the bdp-panel daemon proper, alongside the
- * menu tree, the settings web UI and the watchdog. This file is the
- * link layer and a way to prove it works.
+ * Built with -DHAVE_MPD it is also the player front end: it shows what
+ * MPD is playing on the two lines and maps the transport keys onto MPD
+ * commands. Without it, it is still the link layer and a way to prove the
+ * link works, which is what the host build is for.
+ *
+ * Phase 3 folds the rest in - the menu tree, the settings web UI and
+ * petting the watchdog - around this same poll loop.
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -30,11 +34,16 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <termios.h>
 #include <unistd.h>
+
+#ifdef HAVE_MPD
+#include <mpd/client.h>
+#endif
 
 /* Commands sent to the panel. */
 #define PANEL_ENABLE 0x1Cu
@@ -49,6 +58,37 @@
 #define ICON_FILE  0x96u
 
 #define DEFAULT_DEVICE "/dev/ttyS1"
+
+/*
+ * Display geometry.
+ *
+ * Two lines of an unknown number of columns, and deliberately not guessed
+ * at. A line longer than the panel just runs off the end, so clipping to
+ * a guess cannot help and can only throw away characters the display
+ * would have shown. Text is sent whole.
+ *
+ * What bounds it is UI_TEXT_MAX, and that is a limit on how long one
+ * title may monopolise a 9600 baud link, not a claim about the hardware.
+ *
+ * -w imposes a real column limit for when the width is known and worth
+ * respecting. Scrolling long titles will need it; clipping does not.
+ * Find the number with a ruler and count what appears:
+ *     bdp-panel -1 '....5...10...15...20...25'
+ */
+#define DEFAULT_WIDTH 0        /* 0 = send the whole line, do not clip */
+#define MIN_WIDTH     2        /* line 2 spends a column on the icon */
+#define MAX_WIDTH     64
+
+/* Shown while MPD is not reachable, and once it is. */
+#define TEXT_NO_MPD  "Waiting for MPD"
+#define DEFAULT_READY "BDP-1 Ready"
+
+/* How often to retry a dead MPD connection, in poll ticks of TICK_MS. */
+#define TICK_MS       1000
+#define RECONNECT_TICKS 2
+
+#define DEFAULT_MPD_HOST "localhost"
+#define DEFAULT_MPD_PORT 6600u
 
 /*
  * Command terminator.
@@ -98,6 +138,22 @@ static int write_all(int fd, const unsigned char *buf, size_t len)
 		if (n < 0) {
 			if (errno == EINTR)
 				continue;
+			/*
+			 * The port is O_NONBLOCK, so a write big enough to
+			 * fill the tty's output buffer returns EAGAIN rather
+			 * than blocking, and at 9600 baud that buffer drains
+			 * slowly. Wait for room instead of reporting a
+			 * failure that has not happened.
+			 *
+			 * This could not fire while lines were clipped to
+			 * twenty-odd bytes. Now that a title is sent whole it
+			 * is merely unlikely, which is not the same thing.
+			 */
+			if (errno == EAGAIN) {
+				struct pollfd pfd = { .fd = fd, .events = POLLOUT };
+				if (poll(&pfd, 1, 2000) > 0)
+					continue;
+			}
 			return -1;
 		}
 		off += (size_t)n;
@@ -313,6 +369,235 @@ static long parse_hex(const char *in, unsigned char *out, size_t cap)
 	return (long)n;
 }
 
+/* ------------------------------------------------------------------ *
+ * Display state
+ *
+ * The UART is 9600 baud, which is 960 bytes a second, and a full line
+ * costs about 23 of them. Redrawing on every MPD event would keep the
+ * link permanently busy for no gain, so the last thing written to each
+ * line is remembered and a write only happens when the rendered text
+ * actually differs.
+ * ------------------------------------------------------------------ */
+
+#define UI_TEXT_MAX 128
+
+struct ui {
+	int fd;
+	unsigned width;
+	const char *ready;
+	char shown1[UI_TEXT_MAX];
+	char shown2[UI_TEXT_MAX];
+	int primed;            /* has anything been written yet? */
+};
+
+/*
+ * Copy at most `width` columns of `in` into `out`.
+ *
+ * Control bytes become spaces: 0x11, 0x12 and 0x1C are commands, so a
+ * track title containing one would desynchronise the panel rather than
+ * merely look wrong. Bytes above 0x7F are passed through untouched -
+ * they are the icon range and whatever else the panel's character set
+ * holds, and MPD tags are UTF-8, so this is where a non-ASCII title will
+ * either render or not. Which it does is unknown until a unit shows
+ * something.
+ */
+static void clip(char *out, size_t cap, const char *in, unsigned width)
+{
+	size_t n = 0;
+
+	if (cap == 0)
+		return;
+	/* 0 means no column limit, which is the default; the buffer is
+	 * still the backstop. */
+	if (width == 0 || (size_t)width > cap - 1)
+		width = (unsigned)(cap - 1);
+	for (; in && *in && n < width; in++) {
+		unsigned char c = (unsigned char)*in;
+		out[n++] = (c < 0x20 || c == 0x7F) ? ' ' : (char)c;
+	}
+	out[n] = '\0';
+}
+
+/*
+ * Render both lines. `icon` is a status byte for the first column of
+ * line 2, or -1 for none.
+ */
+static void ui_show(struct ui *u, const char *l1, int icon, const char *l2)
+{
+	char b1[UI_TEXT_MAX], b2[UI_TEXT_MAX];
+
+	clip(b1, sizeof b1, l1, u->width);
+
+	if (icon >= 0) {
+		/* The icon occupies a column, so a limited line 2 gets one
+		 * less. Unlimited stays unlimited: -w is validated to be 0 or
+		 * at least MIN_WIDTH, so this cannot land on 0 by accident. */
+		b2[0] = (char)(unsigned char)icon;
+		clip(b2 + 1, sizeof b2 - 1, l2,
+		     u->width ? u->width - 1 : 0);
+	} else {
+		clip(b2, sizeof b2, l2, u->width);
+	}
+
+	if (!u->primed || strcmp(b1, u->shown1) != 0) {
+		if (panel_send(u->fd, PANEL_LINE1, b1) == 0)
+			snprintf(u->shown1, sizeof u->shown1, "%s", b1);
+	}
+	if (!u->primed || strcmp(b2, u->shown2) != 0) {
+		if (panel_send(u->fd, PANEL_LINE2, b2) == 0)
+			snprintf(u->shown2, sizeof u->shown2, "%s", b2);
+	}
+	u->primed = 1;
+}
+
+#ifdef HAVE_MPD
+/* ------------------------------------------------------------------ *
+ * MPD link
+ *
+ * One connection, held in idle so the kernel wakes us when something
+ * changes rather than us asking. The catch with idle is that a
+ * connection sitting in it cannot accept another command, so anything
+ * that wants to talk - a button press, a status read - has to cancel it
+ * first. That is what mpd_quiesce() is for, and forgetting it produces a
+ * protocol error rather than anything helpful.
+ * ------------------------------------------------------------------ */
+
+struct mpdlink {
+	struct mpd_connection *conn;
+	const char *host;
+	unsigned port;
+	int idling;
+};
+
+static void mpd_drop(struct mpdlink *m)
+{
+	if (m->conn) {
+		mpd_connection_free(m->conn);
+		m->conn = NULL;
+	}
+	m->idling = 0;
+}
+
+/* Non-fatal: MPD not being up yet is the normal case at boot. */
+static int mpd_up(struct mpdlink *m)
+{
+	if (m->conn)
+		return 1;
+	m->conn = mpd_connection_new(m->host, m->port, 3000);
+	if (!m->conn)
+		return 0;
+	if (mpd_connection_get_error(m->conn) != MPD_ERROR_SUCCESS) {
+		mpd_drop(m);
+		return 0;
+	}
+	return 1;
+}
+
+static void mpd_arm(struct mpdlink *m)
+{
+	if (!m->conn || m->idling)
+		return;
+	if (!mpd_send_idle_mask(m->conn, MPD_IDLE_PLAYER))
+		mpd_drop(m);
+	else
+		m->idling = 1;
+}
+
+/* Leave idle so a command can be sent. */
+static int mpd_quiesce(struct mpdlink *m)
+{
+	if (!m->conn)
+		return 0;
+	if (m->idling) {
+		mpd_run_noidle(m->conn);
+		m->idling = 0;
+		if (mpd_connection_get_error(m->conn) != MPD_ERROR_SUCCESS) {
+			mpd_drop(m);
+			return 0;
+		}
+	}
+	return 1;
+}
+
+/* Read state and put it on the display. */
+static void mpd_render(struct mpdlink *m, struct ui *u)
+{
+	struct mpd_status *st;
+	enum mpd_state state;
+
+	if (!mpd_quiesce(m)) {
+		ui_show(u, "BDP-1", (int)ICON_STOP, TEXT_NO_MPD);
+		return;
+	}
+
+	st = mpd_run_status(m->conn);
+	if (!st) {
+		mpd_drop(m);
+		ui_show(u, "BDP-1", (int)ICON_STOP, TEXT_NO_MPD);
+		return;
+	}
+	state = mpd_status_get_state(st);
+	mpd_status_free(st);
+
+	if (state == MPD_STATE_PLAY || state == MPD_STATE_PAUSE) {
+		struct mpd_song *song = mpd_run_current_song(m->conn);
+		const char *title = NULL, *artist = NULL;
+
+		if (song) {
+			title = mpd_song_get_tag(song, MPD_TAG_TITLE, 0);
+			artist = mpd_song_get_tag(song, MPD_TAG_ARTIST, 0);
+			/* An untagged file still has a name. Show the last
+			 * path component rather than the whole URI, which
+			 * would be all directory and no filename once
+			 * clipped to the width. */
+			if (!title) {
+				const char *uri = mpd_song_get_uri(song);
+				const char *slash = uri ? strrchr(uri, '/') : NULL;
+				title = slash ? slash + 1 : uri;
+			}
+		}
+		ui_show(u, title ? title : "Playing",
+			state == MPD_STATE_PLAY ? (int)ICON_PLAY : (int)ICON_PAUSE,
+			artist ? artist : "");
+		if (song)
+			mpd_song_free(song);
+	} else {
+		ui_show(u, u->ready, (int)ICON_STOP, "");
+	}
+
+	mpd_arm(m);
+}
+
+/*
+ * Act on a button.
+ *
+ * Returns 1 if the token was one of ours, so the caller knows whether to
+ * treat it as handled.
+ */
+static int mpd_button(struct mpdlink *m, const char *tok)
+{
+	if (!strcmp(tok, "BDP_PLAY")     || !strcmp(tok, "BDP_PAUSE") ||
+	    !strcmp(tok, "BDP_STOP")     || !strcmp(tok, "BDP_NEXT")  ||
+	    !strcmp(tok, "BDP_PREVIOUS") || !strcmp(tok, "BDP_TOGGLE")) {
+		if (!mpd_quiesce(m))
+			return 1;   /* ours, but there is nothing to send it to */
+	} else {
+		return 0;
+	}
+
+	if      (!strcmp(tok, "BDP_PLAY"))     mpd_run_play(m->conn);
+	else if (!strcmp(tok, "BDP_PAUSE"))    mpd_run_pause(m->conn, true);
+	else if (!strcmp(tok, "BDP_STOP"))     mpd_run_stop(m->conn);
+	else if (!strcmp(tok, "BDP_NEXT"))     mpd_run_next(m->conn);
+	else if (!strcmp(tok, "BDP_PREVIOUS")) mpd_run_previous(m->conn);
+	else if (!strcmp(tok, "BDP_TOGGLE"))   mpd_run_toggle_pause(m->conn);
+
+	if (mpd_connection_get_error(m->conn) != MPD_ERROR_SUCCESS)
+		mpd_drop(m);
+	return 1;
+}
+#endif /* HAVE_MPD */
+
 static void usage(const char *argv0)
 {
 	fprintf(stderr,
@@ -330,11 +615,30 @@ static void usage(const char *argv0)
 		"             e.g. -X '1C 53 33 2E 30 30 0A 0D'\n"
 		"  -n         do not send the enable command\n"
 		"  -D         dump the bytes that would be sent, touch no hardware\n"
+		"  -w COLS    clip display text at COLS; 0 means do not clip,\n"
+		"             which is the default - an over-long line just\n"
+		"             runs off the end of the panel\n"
+		"  -R TEXT    idle message once MPD is up (default \"%s\")\n"
+#ifdef HAVE_MPD
+		"  -m HOST    MPD host (default %s)\n"
+		"  -p PORT    MPD port (default %u)\n"
+		"  -M         do not talk to MPD; just report button events\n"
+#endif
 		"  -h         this\n"
 		"\n"
+#ifdef HAVE_MPD
+		"With no -1/-2, sends enable, then follows MPD on the display\n"
+		"and maps the transport keys onto it. Button events are still\n"
+		"printed, so the log stays useful.\n",
+#else
 		"With no -1/-2, sends enable and then reports button events\n"
-		"until interrupted.\n",
-		argv0, DEFAULT_DEVICE);
+		"until interrupted. Built without MPD support.\n",
+#endif
+		argv0, DEFAULT_DEVICE, DEFAULT_READY
+#ifdef HAVE_MPD
+		, DEFAULT_MPD_HOST, DEFAULT_MPD_PORT
+#endif
+		);
 }
 
 int main(int argc, char **argv)
@@ -346,10 +650,15 @@ int main(int argc, char **argv)
 	int opt, fd, no_enable = 0, dump_only = 0, icon = -1;
 	unsigned char rawbuf[256];
 	long rawlen = -1;
+	unsigned width = DEFAULT_WIDTH;
+	const char *ready = DEFAULT_READY;
+	const char *mpd_host = DEFAULT_MPD_HOST;
+	unsigned mpd_port = DEFAULT_MPD_PORT;
+	int no_mpd = 0;
 
 	default_version(version, sizeof version);
 
-	while ((opt = getopt(argc, argv, "d:v:1:2:i:X:LnDh")) != -1) {
+	while ((opt = getopt(argc, argv, "d:v:1:2:i:X:w:R:m:p:LnDMh")) != -1) {
 		switch (opt) {
 		case 'd': dev = optarg; break;
 		case 'v': snprintf(version, sizeof version, "%s", optarg); break;
@@ -370,6 +679,29 @@ int main(int argc, char **argv)
 				return 2;
 			}
 			break;
+		case 'w': {
+			long w = strtol(optarg, NULL, 10);
+			if (w != 0 && (w < MIN_WIDTH || w > MAX_WIDTH)) {
+				fprintf(stderr,
+					"width must be 0 (no limit) or %d..%d\n",
+					MIN_WIDTH, MAX_WIDTH);
+				return 2;
+			}
+			width = (unsigned)w;
+			break;
+		}
+		case 'R': ready = optarg; break;
+		case 'm': mpd_host = optarg; break;
+		case 'p': {
+			long p = strtol(optarg, NULL, 10);
+			if (p < 1 || p > 65535) {
+				fprintf(stderr, "bad port\n");
+				return 2;
+			}
+			mpd_port = (unsigned)p;
+			break;
+		}
+		case 'M': no_mpd = 1; break;
 		case 'n': no_enable = 1; break;
 		case 'D': dump_only = 1; break;
 		case 'h': usage(argv[0]); return 0;
@@ -446,25 +778,121 @@ int main(int argc, char **argv)
 	signal(SIGINT, on_signal);
 	signal(SIGTERM, on_signal);
 
+#ifdef HAVE_MPD
+	if (!no_mpd)
+		fprintf(stderr, "following MPD at %s:%u, ^C to stop\n",
+			mpd_host, mpd_port);
+	else
+		fprintf(stderr, "monitoring %s, ^C to stop\n", dev);
+#else
+	(void)no_mpd; (void)mpd_host; (void)mpd_port;
 	fprintf(stderr, "monitoring %s, ^C to stop\n", dev);
+#endif
 
 	{
+		struct ui u = { .fd = fd, .width = width, .ready = ready };
 		char acc[256];
 		size_t used = 0;
+		/*
+		 * The panel repeats a token for as long as the button is
+		 * held and never reports a release, so the first sight of a
+		 * token is a press and every identical one after it is the
+		 * same press still happening. BDP_POLL resuming is the only
+		 * signal that the finger came off, so it is what re-arms.
+		 *
+		 * Acting on the press rather than on the release is a
+		 * deliberate difference from the stock firmware, which waited
+		 * so it could tell a tap from a hold and turn a held NEXT
+		 * into a seek. Seeking is not implemented, and skipping one
+		 * track per press is worth more than the option of adding it
+		 * later - which would mean going back to release-based
+		 * handling.
+		 */
+		/* Sized from acc so a long token cannot be truncated into
+		 * looking like a different one, which would swallow a press. */
+		char held[sizeof acc];
+
+		held[0] = '\0';
+		int ticks = 0;
+#ifdef HAVE_MPD
+		struct mpdlink m = { .host = mpd_host, .port = mpd_port };
+
+		if (!no_mpd) {
+			if (mpd_up(&m))
+				mpd_render(&m, &u);
+			else
+				ui_show(&u, "BDP-1", (int)ICON_STOP, TEXT_NO_MPD);
+		}
+#else
+		ui_show(&u, "BDP-1", (int)ICON_STOP, TEXT_NO_MPD);
+#endif
 
 		while (!stop_requested) {
-			struct pollfd pfd = { .fd = fd, .events = POLLIN };
+			struct pollfd pfd[2];
+			int nfd = 1;
 			char buf[128];
 			ssize_t n;
+			int r;
 
-			int r = poll(&pfd, 1, 500);
+			pfd[0].fd = fd;
+			pfd[0].events = POLLIN;
+			pfd[0].revents = 0;
+#ifdef HAVE_MPD
+			/* Only worth polling while idle is actually
+			 * outstanding; at any other moment the socket
+			 * readable means a response we are about to read
+			 * ourselves. */
+			if (!no_mpd && m.conn && m.idling) {
+				pfd[1].fd = mpd_connection_get_fd(m.conn);
+				pfd[1].events = POLLIN;
+				pfd[1].revents = 0;
+				nfd = 2;
+			}
+#endif
+			r = poll(pfd, (nfds_t)nfd, TICK_MS);
 			if (r < 0) {
 				if (errno == EINTR)
 					continue;
 				fprintf(stderr, "poll: %s\n", strerror(errno));
 				break;
 			}
-			if (r == 0)
+
+			if (r == 0) {
+#ifdef HAVE_MPD
+				/* MPD is not up, or went away. Keep trying,
+				 * slowly, and say so on the display. */
+				if (!no_mpd && !m.conn &&
+				    ++ticks >= RECONNECT_TICKS) {
+					ticks = 0;
+					if (mpd_up(&m))
+						mpd_render(&m, &u);
+					else
+						ui_show(&u, "BDP-1",
+							(int)ICON_STOP,
+							TEXT_NO_MPD);
+				}
+#else
+				(void)ticks;
+#endif
+				continue;
+			}
+
+#ifdef HAVE_MPD
+			if (nfd == 2 && (pfd[1].revents & (POLLIN | POLLHUP | POLLERR))) {
+				mpd_recv_idle(m.conn, false);
+				m.idling = 0;
+				if (mpd_connection_get_error(m.conn) != MPD_ERROR_SUCCESS) {
+					mpd_drop(&m);
+					ui_show(&u, "BDP-1", (int)ICON_STOP,
+						TEXT_NO_MPD);
+				} else {
+					mpd_response_finish(m.conn);
+					mpd_render(&m, &u);
+				}
+			}
+#endif
+
+			if (!(pfd[0].revents & POLLIN))
 				continue;
 
 			n = read(fd, buf, sizeof buf);
@@ -478,22 +906,47 @@ int main(int argc, char **argv)
 				continue;
 
 			for (ssize_t i = 0; i < n; i++) {
-				if (buf[i] == '\n' || buf[i] == '\r') {
-					if (used > 0) {
-						acc[used] = '\0';
-						/* POLL is the panel's heartbeat and
-						 * arrives constantly; it is not an
-						 * event worth printing. */
-						if (strcmp(acc, "BDP_POLL") != 0)
-							printf("%s\n", acc);
-						fflush(stdout);
-						used = 0;
-					}
-				} else if (used < sizeof acc - 1) {
-					acc[used++] = buf[i];
+				if (buf[i] != '\n' && buf[i] != '\r') {
+					if (used < sizeof acc - 1)
+						acc[used++] = buf[i];
+					continue;
 				}
+				if (used == 0)
+					continue;
+				acc[used] = '\0';
+				used = 0;
+
+				if (!strcmp(acc, "BDP_POLL")) {
+					/* Heartbeat. Not an event, but it is
+					 * what tells us the button came up. */
+					held[0] = '\0';
+					continue;
+				}
+
+				if (!strcmp(acc, held))
+					continue;   /* still held down */
+				snprintf(held, sizeof held, "%s", acc);
+
+				/* Logged once per press, not once per repeat.
+				 * The panel repeats for as long as a button is
+				 * down, and /var/log is a tmpfs: a leaned-on
+				 * key should not cost a hundred lines. */
+				printf("%s\n", acc);
+				fflush(stdout);
+
+#ifdef HAVE_MPD
+				if (!no_mpd) {
+					if (!m.conn)
+						(void)mpd_up(&m);
+					if (m.conn && mpd_button(&m, acc))
+						mpd_render(&m, &u);
+				}
+#endif
 			}
 		}
+#ifdef HAVE_MPD
+		mpd_drop(&m);
+#endif
 	}
 
 	close(fd);

@@ -12,5 +12,29 @@
 #
 # Terminate commands with LF only instead of LF CR:
 #BDP_PANEL_ARGS="-L"
+#
+# --- Display -----------------------------------------------------------
+#
+# The panel is two lines of an unknown number of columns. 20 is the
+# compiled-in guess and text is clipped to it. To find the real width,
+# write a ruler and count what arrives:
+#
+#   bdp-panel -1 '....5...10...15...20...25'
+#
+# then set it here, no rebuild needed:
+#BDP_PANEL_ARGS="-w 16"
+#
+# The message shown when MPD is connected and stopped:
+#BDP_PANEL_ARGS="-R 'BDP-1 Ready'"
+#
+# --- MPD ---------------------------------------------------------------
+#
+# Where to find MPD, if it ever moves off this box:
+#BDP_PANEL_ARGS="-m 127.0.0.1 -p 6600"
+#
+# Do not talk to MPD at all - just hold the handshake and log buttons.
+# This is what to set if the panel misbehaves and you want the link layer
+# on its own, without the display being rewritten underneath you:
+#BDP_PANEL_ARGS="-M"
 
 BDP_PANEL_ARGS=""

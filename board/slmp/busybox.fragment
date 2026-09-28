@@ -1,3 +1,11 @@
 CONFIG_TELNETD=y
 CONFIG_FEATURE_TELNETD_STANDALONE=y
 CONFIG_FEATURE_TELNETD_PORT_DEFAULT=23
+
+# No CONFIG_FDISK_SUPPORT_LARGE_DISKS. It looks like it is needed - fdisk
+# is on in Buildroot's busybox config and the option is named "Support
+# over 4GB disks", which is exactly the size of card this product
+# shipped with - but busybox declares it "depends on !LFS", because with
+# large file support there is no special code to enable. Buildroot sets
+# CONFIG_LFS=y, so asking for this symbol gets it silently dropped by
+# olddefconfig and fdisk handles big disks already.

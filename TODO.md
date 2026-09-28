@@ -71,19 +71,32 @@ the panel handshaking and reporting button presses.
 
 - [ ] **Confirm S/PDIF output now that `mpd.conf` points at `hw:0,1`.** MPD was
       playing happily to `hw:0,0`, the analog PCM, which produced no sound on
-      the coax output. Needs a reflash and a listen.
-- [ ] **Watchdog: verify `acpi_enforce_resources=lax` creates `/dev/watchdog`.**
-      Root-caused but untested — needs a reflash and a reboot.
+      the coax output. `aplay -l` on the unit now confirms the assumption:
+      card 0 is the Juli@ and device 1 is `ICE1724 IEC958`, with nothing else
+      competing for card 0. Still needs a listen.
+- [x] **Watchdog works.** `acpi_enforce_resources=lax` was necessary and not
+      sufficient: this BIOS had configured all eight MFGPT timers, and
+      `scan_timers()` only counts one as free if its SETUP bit is clear, so
+      geodewdt got nothing. `cs5535_mfgpt.mfgptfix=1` gives
+      `7 MFGPT timers available`, `registered timer 1` and a real
+      `/dev/watchdog`. Verified on hardware.
+- [ ] Watch for side effects from `mfgptfix=1`. It forcibly resets timers the
+      BIOS had set up for its own purposes, on a machine whose BIOS nobody has
+      the source to. Nothing has misbehaved in a short test; leave it running
+      for a while before trusting it.
 - [ ] **USB DAC output.** Second `audio_output` block in `mpd.conf` is written
       but commented out. Enable and test.
-- [ ] **`alsactl` mixer restore.** `S30alsa` restores `/etc/asound.state` if it
-      exists, and nothing creates that file yet. On a running unit:
-      `alsactl -f /etc/asound.state store`, copy the result into the overlay in
-      `phase 1.sh`, rebuild. Until then the Juli@ probably comes up muted.
-<!-- watchdog: root-caused, fix applied, verification listed above -->
-- [ ] **Identify which ethernet driver actually bound.** Networking works, so
-      this is now a trimming question rather than a functional one. `lspci` on
-      the unit, then cut `linux.fragment` down to the one that matters.
+- [ ] **`alsactl` mixer restore.** `S30alsa` now saves to
+      `/data/alsa/asound.state` on shutdown and restores from it, falling back
+      to `/etc/asound.state` as a factory default. So the unit will keep its
+      own mixer settings once it has shut down cleanly at least once. Still
+      worth capturing a known-good state into the overlay as the default,
+      because the Juli@ probably comes up muted on a fresh card:
+      `alsactl -f /etc/asound.state store` and copy that into
+      `board/slmp/rootfs-overlay/etc/`.
+- [x] **Identified which ethernet driver bound.** `lspci` on the unit says
+      `00:0d.0 VIA Technologies VT6105M [Rhine-III]`, so `linux.fragment` is
+      cut down to `VIA_RHINE` and the Realtek and NatSemi drivers are gone.
 
 ### Image trimming
 
@@ -92,8 +105,11 @@ Leave it until the unit boots reliably — it is what makes KVM testing possible
 
 - [ ] Drop `SATA_AHCI`, `ATA_PIIX`, `ATA_GENERIC` once `PATA_CS5536` is confirmed.
 - [ ] Drop `E1000`, `E1000E`, `VIRTIO_NET` and the 11 other virtio symbols.
-- [ ] Trim the ethernet shotgun (`VIA_RHINE`, `8139TOO`, `R8169`, `NATSEMI`)
-      to whichever one `lspci` names.
+- [x] ~~Trim the ethernet shotgun to whichever one `lspci` names.~~ It names
+      VT6105M, so only `VIA_RHINE` is left.
+- [ ] Drop `CFG80211`. It is built in from `i386_defconfig` and announces
+      itself at every boot loading regulatory certificates, on a unit with no
+      radio of any kind.
 
 ### Build system
 
@@ -117,16 +133,67 @@ Leave it until the unit boots reliably — it is what makes KVM testing possible
 
 ## Phase 2: Web UI
 
-- [ ] myMPD integrated, with outbound-HTTPS features compiled out: lyrics
-      fetching, ListenBrainz, fanart, webradio directory.
-- [ ] NFS and SMB storage plugins via MPD's storage plugins, not kernel mounts.
-      `libnfs` is the better technical fit; `libsmbclient` is heavy on 256 MB
-      but most users' music is on SMB. Measure RSS both ways before deciding.
+- [x] myMPD integrated. Buildroot package in `br2-external/package/mympd/`,
+      built from the `src/mympd` submodule, served on port 80, started from
+      `S96mympd`. Builds clean for the Geode; **not yet run on hardware**.
+      See [docs/mympd.md](docs/mympd.md).
+- [ ] Outbound-HTTPS features turned off: lyrics fetching, ListenBrainz,
+      fanart, webradio directory. myMPD 26 has no build options for these
+      individually - they are runtime settings, so this is a matter of
+      finding the right names and putting them in `/etc/default/mympd`.
+- [x] myMPD's settings persist. Work directory is `/data/mympd` on the
+      data partition; the cache stays on tmpfs so cover art cannot wear
+      the card. See [docs/storage.md](docs/storage.md).
+- [x] myMPD runs as root on port 80, decided rather than deferred. A LAN
+      appliance that already runs telnetd and MPD as root does not get
+      safer by moving one daemon to 8080, and `http://<ip>/` is worth
+      more than the gesture.
+- [x] ~~NFS and SMB via MPD's storage plugins, not kernel mounts.~~ **Plan
+      changed: it is not possible here.** `BR2_PACKAGE_MPD_LIBSMBCLIENT`
+      `depends on BR2_TOOLCHAIN_USES_GLIBC` and `BR2_PACKAGE_SAMBA4`
+      `depends on !BR2_TOOLCHAIN_USES_MUSL`, and this image is musl for size.
+      Getting an `smb://` URI into myMPD's mount dialog would mean rebuilding
+      every binary in the image against glibc. Shares are mounted by the
+      kernel instead (`CONFIG_CIFS`), under `/media`, where MPD sees them as
+      ordinary folders — see `/etc/default/shares`.
+- [ ] Decide whether NFS is worth offering too. The kernel already has `nfs`
+      and `nfs4` from `i386_defconfig`, so v4 costs nothing, but BusyBox's
+      mount cannot do the userspace portmapper step v3 needs
+      (`CONFIG_FEATURE_MOUNT_NFS` is off). `libnfs` via MPD's plugin has no
+      glibc dependency and remains the better technical fit if the plugin
+      route is ever wanted.
+- [ ] Measure what MPD's first scan of a network share costs on this CPU, and
+      whether the database on `/data` makes a rescan tolerable.
 - [ ] Share configuration proven through the myMPD interface.
-- [ ] Revisit the MPD database. It currently lives on tmpfs and is rebuilt every
-      boot, which is fine at Phase 1 scale and unacceptable at 30k tracks.
-- [ ] `sticker_file` is deliberately absent from `mpd.conf` — it needs
-      `BR2_PACKAGE_MPD_SQLITE`, which myMPD will want.
+- [x] MPD database, state and playlists moved to `/data/mpd`, so the tag
+      database is no longer rebuilt on every boot and playback resumes
+      where it stopped. **Untested at scale** - the 30k-track question is
+      now about how long the first scan takes, not about tmpfs.
+- [x] `sticker_file` enabled, with `BR2_PACKAGE_MPD_SQLITE`. It needed
+      somewhere persistent to live, which is why it arrived with the data
+      partition.
+- [ ] USB drives automount read-only under `/media`, which is MPD's music
+      directory. Builds; no drive has been plugged into a real unit. Test
+      FAT, exFAT, NTFS and ext4, and find out what a 500 MHz Geode can
+      actually read a large exFAT volume at.
+- [x] **UPnP/OpenHome renderer**, proposal 3.1, and the answer 3.3 gives to
+      abandoning streaming services. upmpdcli, with OpenHome on so the
+      renderer keeps its own playlist and can be gapless. It translates
+      UPnP into MPD commands and never touches ALSA, so the S/PDIF path is
+      untouched. **Builds; never run.**
+- [x] Decoder coverage widened for it, because a renderer plays whatever a
+      control point pushes. ffmpeg as the catch-all (ALAC, WMA, WAV, and
+      anything else), faad2 ahead of it for AAC so the dedicated decoder
+      wins - AAC is known to play on this hardware under the stock 3.12
+      firmware. Costs about 14 MB of ffmpeg libraries.
+- [ ] Listen to it. Nothing here is verified: not the renderer appearing in
+      a control point, not gapless, not whether ffmpeg's ALAC keeps up on a
+      500 MHz core with its assembly disabled.
+- [ ] Consider trimming ffmpeg's decoders to an audio-only list. Everything
+      is on at the moment, video included, which is most of those 14 MB. It
+      was left that way deliberately - enumerating codecs is how you find
+      out eighteen months later which one you forgot - but the video half
+      is provably dead weight on a machine whose only output is S/PDIF.
 
 ---
 
@@ -169,12 +236,25 @@ proper is still to come.
       Left backspaces, hold Right commits. Character set ordered lowercase,
       uppercase, digits, symbols.
 - [ ] Hold Left+Right for 2 s with on-screen countdown for destructive confirms.
-- [ ] MPD integration over `libmpdclient` — already in the image via `mpd-mpc`.
-      Subscribe to `idle`, re-render on change, plus a 200–300 ms tick for
-      scrolling long titles.
-- [ ] Only write bytes when the rendered line differs from what is on screen.
-      The UART is slow and saturating it is easy.
-- [ ] Settings web UI on a separate port, via civetweb.
+- [x] MPD integration over `libmpdclient`. One connection held in `idle`,
+      polled alongside the panel UART in one loop. Transport keys mapped,
+      one action per press with hold repeats suppressed, `BDP-1 Ready` when
+      stopped, title and artist when playing. **Built and PTY-tested; the
+      display has still never shown anything on real hardware.**
+- [ ] Scrolling long titles on a 200-300 ms tick. Nothing is clipped now, so a
+      long title runs off the end of the panel; scrolling is what actually
+      fixes that, and unlike clipping it does need the real width.
+- [ ] Find the real display width, for scrolling rather than for clipping.
+      `bdp-panel -1 '....5...10...15...20...25'` and count.
+- [x] Only write bytes when the rendered line differs from what is on screen.
+- [ ] Settings web UI on a separate port, via civetweb. This is where network
+      shares belong: myMPD's Mounts page drives MPD's `mount` command and has
+      nothing to talk to on a musl image, so adding or changing a share is
+      currently a file edit over ssh. Also network configuration, update
+      control, and a log view. Do **not** solve this by forking myMPD's C:
+      mounting filesystems is not a music player's job, myMPD already runs as
+      root, and every feature added to a 100k-line upstream project is a
+      permanent merge conflict.
 - [ ] Pet the CS5536 watchdog from the main loop. Deliberately not BusyBox's
       watchdog applet: a hung panel daemon should reboot the unit, not sit
       there with a frozen display.
@@ -188,8 +268,15 @@ proper is still to come.
 
 - [ ] Evaluate SWUpdate before writing anything custom. It is Buildroot
       integrated, works on x86, and handles signed artifacts natively.
-- [ ] A/B rootfs slots plus a persistent config partition. The 400 MB single
-      root and `genimage.cfg` both need reworking.
+- [x] Confirmed on hardware that the data partition grows, reboots and
+      formats correctly, leaving exactly 400 MB free for the B slot.
+- [x] Persistent config partition. p3, grown to fill the card on first
+      boot, with 400 MB deliberately left free at the end of the card for
+      the B slot. `RESERVE_MB` in `S03data` must stay equal to the rootfs
+      size in `genimage.cfg`.
+- [ ] A/B rootfs slots. The space is reserved; the B slot becomes p4. The
+      400 MB single root is still oversized for its 46 MB of content, so
+      consider shrinking both slots before committing to the layout.
 - [ ] syslinux `--once` for failed-boot rollback. Note that `BR2_TARGET_SYSLINUX`
       installs nothing into the target, so the on-device `--once` writer needs
       to come from somewhere else.
@@ -202,9 +289,9 @@ proper is still to come.
       to playback. A dead endpoint must produce silence in the logs.
 - [ ] Panel messaging during update. "Updating, do not power off" is not
       optional UX when the alternative is someone pulling the plug mid-write.
-- [ ] **Persistent dropbear host keys.** They currently live on tmpfs and are
-      regenerated every boot, so SSH clients warn about a changed key on every
-      connection. The config partition is where they should live.
+- [x] **Persistent dropbear host keys.** `/etc/dropbear` is now a symlink to
+      `/data/dropbear`, which also stops Buildroot's `S50dropbear` from
+      falling back to regenerating them into tmpfs.
 
 ---
 
